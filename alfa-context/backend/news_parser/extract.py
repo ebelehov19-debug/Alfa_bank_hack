@@ -92,6 +92,9 @@ def article_from_html(raw: str, source: str, candidate: Candidate) -> Candidate:
            or label.startswith(('checking your browser', 'verify you are human', 'проверка браузера'))
            for label in page_labels) or soup.select_one('form[action*="captcha"]'):
         raise ValueError('Access challenge instead of an article')
+    if source == 'tass':
+        from .tass_extract import extract_tass
+        return extract_tass(raw, candidate)
     result = Candidate(**vars(candidate))
     for node in jsonld_nodes(soup):
         result.title = clean_text(node.get("headline", "")) or result.title
@@ -115,6 +118,8 @@ def article_from_html(raw: str, source: str, candidate: Candidate) -> Candidate:
             if result.published_at:
                 break
     if source == "e_disclosure":
+        # The event header is separate from the numbered disclosure body.
+        # Do not parse dates from the legal body: those may be event/signature dates.
         header = soup.select_one('#cont_wrap') or soup.select_one('#content') or soup.select_one('main') or soup
         if header:
             header_copy = soup_of(str(header))
@@ -147,6 +152,7 @@ def article_from_html(raw: str, source: str, candidate: Candidate) -> Candidate:
         if re.search(r'1\.\s*Общие сведения', text):
             result.text = text
     if source == 'e_disclosure' and result.text:
+        # Broad legacy wrappers include company navigation and sidebar news.
         marker = re.search(r'1\.\s*Общие сведения', result.text)
         if marker:
             result.text = result.text[marker.start():]
@@ -169,6 +175,7 @@ def listing_candidates(raw: str, base: str, source: str) -> list[Candidate]:
             continue
         if not PATTERNS[source].search(urlsplit(url).path):
             continue
+        # Do not admit another source's links found in article text or navigation.
         host = urlsplit(url).hostname.removeprefix('www.')
         expected = {"tass": "tass.ru", "moex": "moex.com", "e_disclosure": "e-disclosure.ru"}[source]
         if host != expected:
@@ -177,6 +184,7 @@ def listing_candidates(raw: str, base: str, source: str) -> list[Candidate]:
         time = container.select_one('time') if container else None
         date = parse_date(time.get('datetime', time.get_text(" ", strip=True))) if time else None
         if not date and container:
+            # Only explicit date+time, never a time-only homepage stamp.
             date = parse_date(container.get_text(" ", strip=True))
         issuer = None
         if source == "e_disclosure" and container:

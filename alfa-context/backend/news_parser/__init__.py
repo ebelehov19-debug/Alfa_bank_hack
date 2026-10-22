@@ -1,1 +1,3 @@
-__version__ = "0.2.0"
+"""Public news collection; no LLM calls or client-specific filtering."""
+
+__version__ = "0.3.0"

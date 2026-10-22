@@ -108,6 +108,7 @@ class Transport:
                 raise FetchError("Too many redirects")
             except httpx.HTTPStatusError as exc:
                 last = exc
+                # CAPTCHA/403 may be rendered by the browser; don't hammer HTTP.
                 if exc.response.status_code not in {408, 429, 500, 502, 503, 504}:
                     break
                 retry_after = exc.response.headers.get("retry-after", "")
@@ -136,6 +137,8 @@ class Transport:
                         launch['proxy']['username'] = unquote(proxy.username)
                         launch['proxy']['password'] = unquote(proxy.password or '')
                 self._browser = await self._pw.chromium.launch(**launch)
+                # Match the actual installed browser version. Its default headless
+                # UA was rejected by these sources before their visitor check ran.
                 version = self._browser.version
                 ua = self._session_metadata.get('user_agent') or f'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36'
                 context_options = {'locale': 'ru-RU', 'timezone_id': 'Europe/Moscow',
@@ -149,6 +152,9 @@ class Transport:
 
                 async def route(request_route):
                     request = request_route.request
+                    # Pages may need official static resources to execute JavaScript.
+                    # Both sources use Servicepipe for their ordinary visitor check.
+                    # Blocking its JS prevented Chromium from ever loading the site.
                     if not browser_request_allowed(request.url, request.resource_type):
                         await request_route.abort()
                     else:
@@ -175,7 +181,11 @@ class Transport:
             try:
                 await page.goto(url, wait_until="domcontentloaded")
             except BrowserTimeoutError:
+                # JS visitor checks can navigate before DOMContentLoaded arrives.
+                # The bounded readiness loop below decides whether content loaded.
                 pass
+            # A 403/503 with a JS check can navigate to a real 200 document after
+            # scripts finish. Wait for that navigation, not a fixed one-second sleep.
             deadline = time.monotonic() + self.settings.browser_timeout
             while True:
                 try:
@@ -216,12 +226,125 @@ class Transport:
         except Exception as exc:
             raise FetchError(f"Browser rendering failed: {exc}") from exc
 
+    async def _tass_snapshot(self, page, url, *, article=False):
+        """TASS-only bounded DOM reads, including reads after redirects.
+
+        Do not change e-disclosure navigation while that adapter is out of scope.
+        """
+        from .extract import article_from_html, listing_candidates
+        from .models import Candidate
+        deadline = time.monotonic() + self.settings.browser_timeout
+        last_error, previous, stable = None, None, 0
+        while time.monotonic() < deadline:
+            try:
+                remaining = max(0.05, deadline - time.monotonic())
+                raw = await asyncio.wait_for(page.content(), min(remaining, 5))
+                if is_denied(raw):
+                    raise FetchError(f'TASS denied access: {url}')
+                if not is_challenge(raw) and has_source_content(raw, url):
+                    if article:
+                        parsed = article_from_html(raw, 'tass', Candidate(url))
+                        ready = bool(parsed.title and len(parsed.text) >= 40)
+                        fingerprint = (parsed.title, parsed.text, parsed.published_at)
+                    else:
+                        items = listing_candidates(raw, url, 'tass')
+                        ready = bool(items)
+                        fingerprint = tuple(c.url for c in items)
+                    if ready:
+                        stable = stable + 1 if fingerprint == previous else 1
+                        previous = fingerprint
+                        if stable >= 2:
+                            request_url(page.url)
+                            for cookie in await self._context.cookies([url]):
+                                self.client.cookies.set(cookie['name'], cookie['value'],
+                                                        domain=cookie['domain'], path=cookie['path'])
+                            self._verified.add(urlsplit(url).hostname)
+                            return raw
+            except FetchError:
+                raise
+            except Exception as exc:
+                message = str(exc).lower()
+                if not isinstance(exc, asyncio.TimeoutError) and not any(
+                        marker in message for marker in ('navigat', 'execution context', 'changing the content')):
+                    raise
+                last_error = type(exc).__name__
+                stable = 0
+            await page.wait_for_timeout(250)
+        raise FetchError(f'TASS page did not settle within {self.settings.browser_timeout:g}s: {url}'
+                         + (f' ({last_error})' if last_error else ''))
+
+    async def _tass_page(self, url):
+        from playwright.async_api import TimeoutError as BrowserTimeoutError
+        url = request_url(url)
+        if urlsplit(url).hostname not in {'tass.ru', 'www.tass.ru'}:
+            raise ValueError('TASS browser adapter only accepts tass.ru')
+        await self._ensure_browser()
+        await self._pace(url)
+        page = await self._context.new_page()
+        try:
+            try:
+                await page.goto(url, wait_until='domcontentloaded')
+            except BrowserTimeoutError:
+                pass
+            return page
+        except Exception:
+            await page.close()
+            raise
+
+    async def tass_render(self, url):
+        page = await self._tass_page(url)
+        try:
+            return await self._tass_snapshot(page, url, article=True)
+        finally:
+            await page.close()
+
+    async def tass_listing(self, url, source, target, cutoff):
+        """Keep loaded list pages; later navigation failure cannot discard them."""
+        from .extract import listing_candidates
+        page = await self._tass_page(url)
+        pages, ids, stale = [], set(), 0
+        try:
+            for _ in range(self.settings.max_pages):
+                try:
+                    raw = await self._tass_snapshot(page, url)
+                except Exception:
+                    if pages:
+                        log.warning('TASS list stopped loading; keeping %d discovered links', len(ids))
+                        break
+                    raise
+                pages.append(raw)
+                before = len(ids)
+                ids.update(c.url for c in listing_candidates(raw, url, 'tass'))
+                stale = stale + 1 if before == len(ids) else 0
+                if len(ids) >= target or stale >= 2:
+                    break
+                import re as regex
+                buttons = page.get_by_role('button', name=regex.compile(r'^(?:Показать|Загрузить)\s+ещ[её]$', regex.I))
+                clicked = False
+                for button in await buttons.all():
+                    if await button.is_visible() and await button.is_enabled():
+                        await button.click()
+                        clicked = True
+                        break
+                if not clicked:
+                    await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                await page.wait_for_timeout(max(750, self.settings.delay * 1000))
+            return pages
+        finally:
+            await page.close()
+
     async def listing(self, url, source, target, cutoff):
+        """Render public lists, interact with date search and load-more controls.
+
+        Return all observed HTML pages, including replaced pagination pages.
+        Unknown UI or CAPTCHA results in a partial/error report, not an empty success.
+        """
         from .extract import listing_candidates
         pages, ids, stale = [], set(), 0
         page = await self._open(url)
         try:
             if source == "e_disclosure":
+                # Use the site's own search form; do not invent a private API URL.
                 date_picker = page.get_by_text('Выбрать дату публикации', exact=False)
                 if await date_picker.count() and await date_picker.first.is_visible():
                     await date_picker.first.click()
@@ -238,11 +361,13 @@ class Transport:
                     for item, date in zip(dated[:2], (cutoff.astimezone(MSK), datetime.now(MSK))):
                         value = date.strftime("%Y-%m-%d") if await item.get_attribute("type") == "date" else date.strftime("%d.%m.%Y")
                         await item.fill(value)
+                    # The date range is selected in a modal on the legacy portal.
                     confirm = page.get_by_role('button', name='Подтвердить выбор', exact=True)
                     for item in await confirm.all():
                         if await item.is_visible():
                             await item.click()
                             break
+                # Several modal dialogs also have 'Искать'; select a visible search action.
                 for control in await page.locator('button, input[type="submit"], input[type="button"], a.btn').all():
                     label = (await control.inner_text()) or (await control.get_attribute("value")) or ""
                     if await control.is_visible() and label.strip() in {"Искать", "Поиск", "Найти"}:
@@ -258,6 +383,7 @@ class Transport:
                 stale = stale + 1 if len(ids) == old else 0
                 if len(ids) >= target or stale >= 3:
                     break
+                # Explicit pagination is preferable to infinite scroll when available.
                 clicked = False
                 for control in await page.locator('a, button, input[type="button"], input[type="submit"]').all():
                     label = ((await control.inner_text()) or (await control.get_attribute("value")) or "").strip()
