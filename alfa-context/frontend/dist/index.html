@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ru">
+ <head>
+  <meta charset="UTF-8"/>
+  <meta content="width=device-width,initial-scale=1" name="viewport"/>
+  <title>
+   Альфа Контекст — бизнес в контексте
+  </title>
+  <link href="style.css" rel="stylesheet"/>
+ </head>
+ <body>
+  <aside class="sidebar">
+   <a class="brand" href="#">
+    <span class="alpha">
+     А
+    </span>
+    <span>
+     альфа
+     <span class="brand-light">
+      контекст
+     </span>
+    </span>
+   </a>
+   <div class="workspace">
+    АЛЬФА-БИЗНЕС / АНАЛИТИКА
+   </div>
+   <nav>
+    <button class="active" data-page="feed">
+     <span>
+      ◫
+     </span>
+     Моя лента
+     <b>
+      4
+     </b>
+    </button>
+    <button data-page="network">
+     <span>
+      ⌘
+     </span>
+     Связи компании
+    </button>
+    <button data-page="company">
+     <span>
+      ▤
+     </span>
+     Бизнес-профиль
+    </button>
+    <button data-page="saved">
+     <span>
+      ☆
+     </span>
+     Сохранённое
+    </button>
+    <button data-page="sources">
+     <span>
+      ▧
+     </span>
+     Источники
+    </button>
+   </nav>
+   <div class="side-note">
+    <i>
+    </i>
+    Прототип для хакатона
+    <p>
+     Контекст из ваших CSV.
+     <br/>
+     События — учебные сценарии.
+    </p>
+   </div>
+   <div class="user">
+    <div class="avatar">
+     ЕБ
+    </div>
+    <div>
+     Егор Белехов
+     <small>
+      Рабочее пространство
+     </small>
+    </div>
+   </div>
+  </aside>
+  <div class="shell">
+   <header>
+    <div class="crumb">
+     Аналитика
+     <span>
+      /
+     </span>
+     <strong id="crumb">
+      Моя лента
+     </strong>
+    </div>
+    <div class="head-controls">
+     <select aria-label="Компания" id="companySelect">
+     </select>
+     <div class="separator">
+     </div>
+     <span class="online-dot">
+     </span>
+     <span class="private">
+      Приватный прототип
+     </span>
+    </div>
+   </header>
+   <main>
+    <div class="page-heading">
+     <div>
+      <div class="eyebrow">
+       БИЗНЕС В КОНТЕКСТЕ
+      </div>
+      <h1 id="title">
+       Важное для вашего бизнеса
+      </h1>
+      <p id="subtitle">
+       События, связи и решения. С учётом вашей компании.
+      </p>
+     </div>
+     <div class="role">
+      <label for="roleSelect">
+       Смотрю как
+      </label>
+      <select id="roleSelect">
+       <option value="cfo">
+        Финансовый директор
+       </option>
+       <option value="ceo">
+        Генеральный директор
+       </option>
+       <option value="treasury">
+        Казначей
+       </option>
+      </select>
+     </div>
+    </div>
+    <div class="demo-banner">
+     <span class="badge">
+      ДЕМО
+     </span>
+     Профили и связи рассчитаны по CSV. Новости и интерпретации смоделированы; LLM и сбор источников ещё не подключены.
+    </div>
+    <div id="view">
+    </div>
+   </main>
+   <footer>
+    Альфа Контекст · концепт для хакатона
+    <span>
+     Факты отдельно. Выводы прозрачно.
+    </span>
+   </footer>
+  </div>
+  <dialog id="detail">
+   <div id="detailContent">
+   </div>
+  </dialog>
+  <div id="toast" role="status">
+  </div>
+  <script src="data.js">
+  </script>
+  <script src="app.js">
+  </script>
+ </body>
+</html>
