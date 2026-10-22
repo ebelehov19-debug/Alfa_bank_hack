@@ -31,7 +31,6 @@ class ContextTest(unittest.TestCase):
             self.assertEqual(context['shared_person_companies'], ['B'])
             self.assertIsNone(profile(db,'C')['features']['MAINOKVED_NAME'])
             self.assertIsNone(profile(db,'C')['payments']['incoming']['sector_coverage'])
-            # A bad re-import must preserve the previous complete dataset.
             (root/'df_Uid_payment_hack.csv').write_text('PAYER;BENEFICIARY;PAY_AMT;PAY_CNT\nA;B;NaN;1\n')
             with self.assertRaises(ValueError):
                 ingest(db, root)

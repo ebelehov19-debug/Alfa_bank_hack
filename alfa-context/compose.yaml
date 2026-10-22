@@ -1,0 +1,21 @@
+services:
+  parser:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.parser
+      target: runtime
+    init: true
+    shm_size: 1gb
+    volumes:
+      - ./data/news:/data
+    restart: "no"
+
+  parser-test:
+    profiles: [test]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.parser
+      target: test
+    init: true
+    shm_size: 1gb
+    network_mode: none

@@ -1,0 +1,19 @@
+FROM mcr.microsoft.com/playwright/python:v1.56.0-noble AS base
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1
+WORKDIR /app
+COPY requirements-parser.txt ./
+RUN python -m pip install -r requirements-parser.txt
+
+FROM base AS test
+COPY requirements-test.txt pytest.ini ./
+RUN python -m pip install -r requirements-test.txt
+COPY core.py ./
+COPY news_parser ./news_parser
+COPY tests ./tests
+CMD ["python", "-m", "pytest", "-q"]
+
+FROM base AS runtime
+ENV NEWS_OUTPUT=/data
+COPY news_parser ./news_parser
+ENTRYPOINT ["python", "-m", "news_parser"]
+CMD ["--output", "/data"]

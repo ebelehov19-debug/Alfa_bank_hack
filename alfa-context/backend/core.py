@@ -1,4 +1,3 @@
-"""Company context foundation. Python standard library only; no LLM calls."""
 import argparse
 import csv
 import json
@@ -27,7 +26,6 @@ def connect(path):
 
 
 def ingest(db, directory):
-    """Atomic replacement, retaining raw conflicting company rows and payment rows."""
     directory = Path(directory)
     company_path = directory / "df_Uid_data_hack.csv"
     payment_path = directory / "df_Uid_payment_hack.csv"

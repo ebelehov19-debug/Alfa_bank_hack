@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/alfa-hack/news.schema.json",
+  "title": "News parser batch",
+  "type": "array",
+  "maxItems": 600,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "id",
+      "source",
+      "url",
+      "title",
+      "text",
+      "published_at",
+      "collected_at",
+      "categories",
+      "issuer",
+      "language"
+    ],
+    "properties": {
+      "id": {
+        "type": "string",
+        "pattern": "^(moex|tass|e_disclosure):[0-9a-f]{24}$"
+      },
+      "source": {
+        "enum": [
+          "moex",
+          "tass",
+          "e_disclosure"
+        ]
+      },
+      "url": {
+        "type": "string",
+        "format": "uri"
+      },
+      "title": {
+        "type": "string",
+        "minLength": 1
+      },
+      "text": {
+        "type": "string",
+        "minLength": 40
+      },
+      "published_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "collected_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "categories": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "uniqueItems": true
+      },
+      "issuer": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "language": {
+        "const": "ru"
+      }
+    }
+  }
+}
