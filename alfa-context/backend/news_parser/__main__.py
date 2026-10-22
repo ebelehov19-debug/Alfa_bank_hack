@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import json
 import logging
 import os
+from pathlib import Path
 import sys
 from uuid import uuid4
 
@@ -27,7 +28,8 @@ async def collect(settings, selected, state, now, transport):
 async def run(args):
     settings = Settings(hours=args.hours, limit=args.limit, timeout=args.timeout,
                         delay=args.delay, retries=args.retries, max_pages=args.max_pages,
-                        browser=not args.no_browser)
+                        browser=not args.no_browser, browser_timeout=getattr(args, 'browser_timeout', 60),
+                        browser_state=getattr(args, 'browser_state', None) or str(Path(args.output) / '.browser-state.json'))
     storage = Storage(args.output)
     now = datetime.now(UTC)
     with storage.lock():
@@ -58,6 +60,8 @@ def main():
     parser.add_argument('--hours', type=int, default=48)
     parser.add_argument('--limit', type=int, default=200)
     parser.add_argument('--timeout', type=float, default=20)
+    parser.add_argument('--browser-timeout', type=float, default=60, help='Maximum wait for visitor JavaScript checks')
+    parser.add_argument('--browser-state', help='Playwright storage-state JSON from a previously verified visitor session')
     parser.add_argument('--delay', type=float, default=0.5, help='Minimum interval between requests per host')
     parser.add_argument('--retries', type=int, default=2, help='Additional HTTP attempts')
     parser.add_argument('--max-pages', type=int, default=20)

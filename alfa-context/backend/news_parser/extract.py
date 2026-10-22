@@ -1,3 +1,4 @@
+"""Deterministic extraction: prefer structured article data, then source selectors."""
 from __future__ import annotations
 
 import html
@@ -8,7 +9,8 @@ from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup
 import feedparser
 
-from .models import Candidate, canonical_url, parse_date
+from .access import is_challenge
+from .models import Candidate, canonical_url, parse_date, request_url
 
 
 def soup_of(value: str) -> BeautifulSoup:
@@ -19,6 +21,7 @@ def clean_text(value: str) -> str:
     soup = soup_of(value)
     for tag in soup.select("script, style, nav, footer, header, aside, form, button, iframe"):
         tag.decompose()
+    # Keep paragraph boundaries without introducing a newline at every inline tag.
     for tag in soup.select("br"):
         tag.replace_with("\n")
     for tag in soup.select("p, div, li, tr, h1, h2, h3"):
@@ -35,12 +38,13 @@ def rss_candidates(raw: str, source: str) -> list[Candidate]:
     result = []
     for entry in feed.entries:
         try:
-            url = canonical_url(entry.get("link", ""))
+            url = request_url(entry.get("link", ""))
         except ValueError:
             continue
         cats = [t.term for t in entry.get("tags", []) if t.get("term")]
         if source == "tass" and not urlsplit(url).path.startswith("/ekonomika/"):
             continue
+        # RSS description is generally a teaser; only content:encoded is a body.
         body = "\n".join(clean_text(c.value) for c in entry.get("content", []) if c.get("value"))
         result.append(Candidate(url, html.unescape(entry.get("title", "")),
                                 parse_date(entry.get("published")), cats, text=body))
@@ -79,6 +83,8 @@ BODY_SELECTORS = {
 
 def article_from_html(raw: str, source: str, candidate: Candidate) -> Candidate:
     soup = soup_of(raw)
+    if is_challenge(raw):
+        raise ValueError('Visitor check instead of an article')
     title = soup.select_one('title')
     heading = soup.select_one('h1')
     page_labels = [(node.get_text(' ', strip=True).lower()) for node in (title, heading) if node]
@@ -158,12 +164,12 @@ def listing_candidates(raw: str, base: str, source: str) -> list[Candidate]:
     found = {}
     for a in soup.select('a[href]'):
         try:
-            url = canonical_url(urljoin(base, a['href']))
+            url = request_url(urljoin(base, a['href']))
         except ValueError:
             continue
         if not PATTERNS[source].search(urlsplit(url).path):
             continue
-        host = urlsplit(url).hostname
+        host = urlsplit(url).hostname.removeprefix('www.')
         expected = {"tass": "tass.ru", "moex": "moex.com", "e_disclosure": "e-disclosure.ru"}[source]
         if host != expected:
             continue
@@ -187,7 +193,7 @@ def next_page(raw: str, base: str) -> str | None:
     for a in soup.select('a[rel="next"], .pagination a, .pager a, a.next'):
         if 'next' in a.get('rel', []) or re.search(r"след|далее|next|[›»]", a.get_text(" ", strip=True), re.I):
             try:
-                return canonical_url(urljoin(base, a['href']))
+                return request_url(urljoin(base, a['href']))
             except (ValueError, KeyError):
                 pass
     return None

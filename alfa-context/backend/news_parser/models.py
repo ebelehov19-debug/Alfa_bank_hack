@@ -15,6 +15,21 @@ HOSTS = {"www.moex.com", "moex.com", "iss.moex.com", "tass.ru", "www.tass.ru",
          "e-disclosure.ru", "www.e-disclosure.ru"}
 
 
+def request_url(value: str) -> str:
+    """Validate the URL without rewriting its host, query names or query order.
+
+    Canonicalization is for identity only: signed/challenge URLs and www redirects
+    must reach the server exactly as advertised.
+    """
+    p = urlsplit(value.strip())
+    host = (p.hostname or '').lower()
+    if p.scheme not in {'http', 'https'} or host not in HOSTS or p.username or p.password:
+        raise ValueError(f'URL outside supported sources: {host}')
+    if p.port not in (None, 80, 443):
+        raise ValueError('Nonstandard URL port')
+    return urlunsplit((p.scheme, p.netloc, p.path or '/', p.query, ''))
+
+
 def canonical_url(value: str) -> str:
     p = urlsplit(value.strip())
     host = (p.hostname or "").lower()
@@ -35,7 +50,7 @@ def news_id(source: str, url: str) -> str:
     elif source == "tass" and (m := re.search(r"/(\d+)/?$", p.path)):
         key = m[1]
     elif source == "e_disclosure" and (event := dict(parse_qsl(p.query)).get("eventid")):
-        key = event
+        key = event  # Case-sensitive source ID; preserve its value.
     else:
         key = canonical_url(url)
     return source + ":" + sha256(key.encode()).hexdigest()[:24]
@@ -106,11 +121,13 @@ class Settings:
     retries: int = 2
     max_pages: int = 20
     browser: bool = True
+    browser_timeout: float = 60
+    browser_state: str | None = None
 
     def __post_init__(self):
         if not 1 <= self.hours <= 48 or not 1 <= self.limit <= 200:
             raise ValueError("hours must be 1..48, limit must be 1..200")
-        if self.timeout <= 0 or self.delay < 0 or not 0 <= self.retries <= 5 or self.max_pages < 1:
+        if self.timeout <= 0 or self.browser_timeout <= 0 or self.delay < 0 or not 0 <= self.retries <= 5 or self.max_pages < 1:
             raise ValueError("Invalid network or pagination settings")
 
     def cutoff(self, now: datetime) -> datetime:

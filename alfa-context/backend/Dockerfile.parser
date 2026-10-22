@@ -17,3 +17,12 @@ ENV NEWS_OUTPUT=/data
 COPY news_parser ./news_parser
 ENTRYPOINT ["python", "-m", "news_parser"]
 CMD ["--output", "/data"]
+
+FROM runtime AS session
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb x11vnc novnc websockify \
+    && rm -rf /var/lib/apt/lists/*
+COPY browser-session.sh /app/browser-session.sh
+ENV DISPLAY=:99
+ENTRYPOINT ["bash", "/app/browser-session.sh"]
+CMD ["--output", "/data/.browser-state.json"]

@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from .extract import (article_from_html, clean_text, listing_candidates, next_page,
                       rss_candidates)
-from .models import Article, Candidate, Settings, canonical_url, news_id, parse_date
+from .models import Article, Candidate, Settings, canonical_url, news_id, parse_date, request_url
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +67,6 @@ class Source:
                 result.discovery_ok = True
             except Exception as exc:
                 result.warnings.append(f"RSS unavailable, using HTML: {exc}")
-        # RSS is finite and can cover less than 48h, especially TASS. Supplement it.
         url, visited = self.listing_url, set()
         http_failed = False
         for _ in range(self.settings.max_pages):
@@ -143,7 +142,7 @@ class Source:
             if all_dated and len(accepted) >= self.settings.limit:
                 break
             try:
-                candidate.url = canonical_url(candidate.url)
+                candidate.url = request_url(candidate.url)
                 key = news_id(self.name, candidate.url)
                 if key in unique:
                     continue
@@ -240,6 +239,29 @@ class Tass(Source):
 class EDisclosure(Source):
     name = "e_disclosure"
     listing_url = "https://www.e-disclosure.ru/poisk-po-soobshheniyam"
+
+    async def discover(self, cutoff, now, result, target):
+        home = 'https://www.e-disclosure.ru/'
+        initial = []
+        try:
+            try:
+                raw = await self.transport.get(home)
+                method = 'http_html'
+            except Exception:
+                if not self.settings.browser:
+                    raise
+                raw = await self.transport.render(home)
+                method = 'chromium_html'
+            initial = listing_candidates(raw, home, self.name)
+            if initial:
+                result.discovery_ok = True
+                result.methods.append(method)
+        except Exception as exc:
+            log.info('e_disclosure home session bootstrap: %s', exc)
+        if len(initial) >= target:
+            return initial
+        found = await super().discover(cutoff, now, result, target)
+        return list({c.url: c for c in initial + found}.values())
 
 
 ADAPTERS = {"moex": Moex, "tass": Tass, "e_disclosure": EDisclosure}

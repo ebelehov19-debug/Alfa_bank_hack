@@ -7,10 +7,13 @@ import os
 import re
 import time
 from urllib.parse import unquote, urlsplit
+from pathlib import Path
+import json
 
 import httpx
 
-from .models import HOSTS, Settings, canonical_url
+from .access import browser_request_allowed, has_source_content, is_challenge, is_denied
+from .models import HOSTS, Settings, request_url
 
 log = logging.getLogger(__name__)
 USER_AGENT = "AlfaHackNewsParser/0.1 (+public-news-research)"
@@ -33,6 +36,17 @@ class Transport:
         self._last = defaultdict(float)
         self._browser_lock = asyncio.Lock()
         self._pw = self._browser = self._context = None
+        self._verified = set()
+        self._session_metadata = {}
+        if settings.browser_state and Path(settings.browser_state).exists():
+            saved = json.loads(Path(settings.browser_state).read_text(encoding='utf-8'))
+            self._session_metadata = saved.get('_news_parser', {})
+            if self._session_metadata.get('user_agent'):
+                self.client.headers['User-Agent'] = self._session_metadata['user_agent']
+            for cookie in saved.get('cookies', []):
+                if cookie.get('domain', '').lstrip('.') in HOSTS:
+                    self.client.cookies.set(cookie['name'], cookie['value'],
+                                            domain=cookie['domain'], path=cookie.get('path', '/'))
 
     async def __aenter__(self):
         return self
@@ -40,6 +54,14 @@ class Transport:
     async def __aexit__(self, *args):
         try:
             if self._context:
+                if self.settings.browser_state and self._verified:
+                    from .storage import atomic_json
+                    path = Path(self.settings.browser_state)
+                    saved = await self._context.storage_state()
+                    saved['_news_parser'] = {'user_agent': self.client.headers['User-Agent']}
+                    atomic_json(path, saved)
+                    if os.name != 'nt':
+                        path.chmod(0o600)
                 await self._context.close()
             if self._browser:
                 await self._browser.close()
@@ -57,8 +79,8 @@ class Transport:
             self._last[host] = time.monotonic()
 
     async def get(self, url: str) -> str:
-        url = canonical_url(url)
-        original_host = urlsplit(url).hostname
+        url = request_url(url)
+        original_host = urlsplit(url).hostname.removeprefix('www.')
         last = None
         for attempt in range(self.settings.retries + 1):
             current = url
@@ -67,8 +89,8 @@ class Transport:
                     await self._pace(current)
                     async with self.client.stream("GET", current) as response:
                         if response.is_redirect:
-                            current = canonical_url(str(response.url.join(response.headers["location"])))
-                            if urlsplit(current).hostname != original_host:
+                            current = request_url(str(response.url.join(response.headers["location"])))
+                            if urlsplit(current).hostname.removeprefix('www.') != original_host:
                                 raise FetchError("Redirect to another source is not allowed")
                             continue
                         response.raise_for_status()
@@ -79,11 +101,13 @@ class Transport:
                                 raise FetchError("Response exceeds 8 MiB")
                             parts.append(chunk)
                         encoding = response.encoding or "utf-8"
-                        return b"".join(parts).decode(encoding, errors="replace")
+                        raw = b"".join(parts).decode(encoding, errors="replace")
+                        if is_challenge(raw):
+                            raise FetchError(f'JavaScript access check at {url}; browser session required')
+                        return raw
                 raise FetchError("Too many redirects")
             except httpx.HTTPStatusError as exc:
                 last = exc
-
                 if exc.response.status_code not in {408, 429, 500, 502, 503, 504}:
                     break
                 retry_after = exc.response.headers.get("retry-after", "")
@@ -112,14 +136,20 @@ class Transport:
                         launch['proxy']['username'] = unquote(proxy.username)
                         launch['proxy']['password'] = unquote(proxy.password or '')
                 self._browser = await self._pw.chromium.launch(**launch)
-                self._context = await self._browser.new_context(locale="ru-RU", timezone_id="Europe/Moscow")
+                version = self._browser.version
+                ua = self._session_metadata.get('user_agent') or f'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36'
+                context_options = {'locale': 'ru-RU', 'timezone_id': 'Europe/Moscow',
+                                   'user_agent': ua, 'viewport': {'width': 1365, 'height': 900}}
+                if self.settings.browser_state and Path(self.settings.browser_state).exists():
+                    saved = json.loads(Path(self.settings.browser_state).read_text(encoding='utf-8'))
+                    context_options['storage_state'] = {key: saved.get(key, []) for key in ('cookies', 'origins')}
+                self._context = await self._browser.new_context(**context_options)
+                self.client.headers['User-Agent'] = ua
                 self._context.set_default_timeout(self.settings.timeout * 1000)
 
                 async def route(request_route):
                     request = request_route.request
-                    host = urlsplit(request.url).hostname or ""
-                    allowed = host in HOSTS or host.endswith((".tass.ru", ".moex.com", ".e-disclosure.ru"))
-                    if request.resource_type in {"image", "media", "font"} or not allowed:
+                    if not browser_request_allowed(request.url, request.resource_type):
                         await request_route.abort()
                     else:
                         await request_route.continue_()
@@ -131,16 +161,46 @@ class Transport:
                 raise FetchError(f"Chromium unavailable: {exc}") from exc
 
     async def _open(self, url):
-        url = canonical_url(url)
+        url = request_url(url)
         await self._ensure_browser()
         await self._pace(url)
         page = await self._context.new_page()
+        status = [None]
+        def navigation_response(response):
+            if response.request.is_navigation_request() and response.frame == page.main_frame:
+                status[0] = response.status
+        page.on('response', navigation_response)
         try:
-            response = await page.goto(url, wait_until="domcontentloaded")
-            await page.wait_for_timeout(1000)
-            if response and response.status >= 400:
-                raise FetchError(f"Chromium HTTP {response.status}: {url}")
-            canonical_url(page.url)
+            from playwright.async_api import TimeoutError as BrowserTimeoutError
+            try:
+                await page.goto(url, wait_until="domcontentloaded")
+            except BrowserTimeoutError:
+                pass
+            deadline = time.monotonic() + self.settings.browser_timeout
+            while True:
+                try:
+                    raw = await asyncio.wait_for(page.content(), timeout=min(10, self.settings.browser_timeout))
+                    checking = is_challenge(raw)
+                    if not checking:
+                        if is_denied(raw) or (status[0] and status[0] >= 400):
+                            raise FetchError(f'Chromium access denied (HTTP {status[0] or "unknown"}): {url}')
+                        request_url(page.url)
+                        if has_source_content(raw, url):
+                            break
+                except asyncio.TimeoutError:
+                    raise FetchError(f'Browser page remained busy during its visitor check: {url}') from None
+                except FetchError:
+                    raise
+                except Exception as exc:
+                    if 'navigation' not in str(exc).lower() and 'execution context' not in str(exc).lower():
+                        raise
+                if time.monotonic() >= deadline:
+                    raise FetchError(f'Visitor check/CAPTCHA did not complete within {self.settings.browser_timeout:g}s: {url}. Use a verified --browser-state or a network accepted by the source')
+                await page.wait_for_timeout(500)
+            for cookie in await self._context.cookies([url]):
+                self.client.cookies.set(cookie['name'], cookie['value'],
+                                        domain=cookie['domain'], path=cookie['path'])
+            self._verified.add(urlsplit(url).hostname)
             return page
         except Exception:
             await page.close()
