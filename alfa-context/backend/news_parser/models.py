@@ -16,11 +16,6 @@ HOSTS = {"www.moex.com", "moex.com", "iss.moex.com", "tass.ru", "www.tass.ru",
 
 
 def request_url(value: str) -> str:
-    """Validate the URL without rewriting its host, query names or query order.
-
-    Canonicalization is for identity only: signed/challenge URLs and www redirects
-    must reach the server exactly as advertised.
-    """
     p = urlsplit(value.strip())
     host = (p.hostname or '').lower()
     if p.scheme not in {'http', 'https'} or host not in HOSTS or p.username or p.password:
@@ -50,7 +45,7 @@ def news_id(source: str, url: str) -> str:
     elif source == "tass" and (m := re.search(r"/(\d+)/?$", p.path)):
         key = m[1]
     elif source == "e_disclosure" and (event := dict(parse_qsl(p.query)).get("eventid")):
-        key = event  # Case-sensitive source ID; preserve its value.
+        key = event
     else:
         key = canonical_url(url)
     return source + ":" + sha256(key.encode()).hexdigest()[:24]

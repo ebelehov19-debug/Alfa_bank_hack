@@ -24,7 +24,6 @@ class FetchError(RuntimeError):
 
 
 class Transport:
-    """Bounded HTTP requests and a lazily started, shared Chromium instance."""
 
     def __init__(self, settings: Settings, client=None):
         self.settings = settings
@@ -108,7 +107,6 @@ class Transport:
                 raise FetchError("Too many redirects")
             except httpx.HTTPStatusError as exc:
                 last = exc
-                # CAPTCHA/403 may be rendered by the browser; don't hammer HTTP.
                 if exc.response.status_code not in {408, 429, 500, 502, 503, 504}:
                     break
                 retry_after = exc.response.headers.get("retry-after", "")
@@ -137,8 +135,6 @@ class Transport:
                         launch['proxy']['username'] = unquote(proxy.username)
                         launch['proxy']['password'] = unquote(proxy.password or '')
                 self._browser = await self._pw.chromium.launch(**launch)
-                # Match the actual installed browser version. Its default headless
-                # UA was rejected by these sources before their visitor check ran.
                 version = self._browser.version
                 ua = self._session_metadata.get('user_agent') or f'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36'
                 context_options = {'locale': 'ru-RU', 'timezone_id': 'Europe/Moscow',
@@ -152,9 +148,6 @@ class Transport:
 
                 async def route(request_route):
                     request = request_route.request
-                    # Pages may need official static resources to execute JavaScript.
-                    # Both sources use Servicepipe for their ordinary visitor check.
-                    # Blocking its JS prevented Chromium from ever loading the site.
                     if not browser_request_allowed(request.url, request.resource_type):
                         await request_route.abort()
                     else:
@@ -181,11 +174,7 @@ class Transport:
             try:
                 await page.goto(url, wait_until="domcontentloaded")
             except BrowserTimeoutError:
-                # JS visitor checks can navigate before DOMContentLoaded arrives.
-                # The bounded readiness loop below decides whether content loaded.
                 pass
-            # A 403/503 with a JS check can navigate to a real 200 document after
-            # scripts finish. Wait for that navigation, not a fixed one-second sleep.
             deadline = time.monotonic() + self.settings.browser_timeout
             while True:
                 try:
@@ -227,10 +216,6 @@ class Transport:
             raise FetchError(f"Browser rendering failed: {exc}") from exc
 
     async def _tass_snapshot(self, page, url, *, article=False):
-        """TASS-only bounded DOM reads, including reads after redirects.
-
-        Do not change e-disclosure navigation while that adapter is out of scope.
-        """
         from .extract import article_from_html, listing_candidates
         from .models import Candidate
         deadline = time.monotonic() + self.settings.browser_timeout
@@ -243,7 +228,7 @@ class Transport:
                     raise FetchError(f'TASS denied access: {url}')
                 if not is_challenge(raw) and has_source_content(raw, url):
                     if article:
-                        parsed = article_from_html(raw, 'tass', Candidate(url))
+                        parsed = article_from_html(raw, 'tass', Candidate(url), rendered=True)
                         ready = bool(parsed.title and len(parsed.text) >= 40)
                         fingerprint = (parsed.title, parsed.text, parsed.published_at)
                     else:
@@ -299,7 +284,6 @@ class Transport:
             await page.close()
 
     async def tass_listing(self, url, source, target, cutoff):
-        """Keep loaded list pages; later navigation failure cannot discard them."""
         from .extract import listing_candidates
         page = await self._tass_page(url)
         pages, ids, stale = [], set(), 0
@@ -334,17 +318,11 @@ class Transport:
             await page.close()
 
     async def listing(self, url, source, target, cutoff):
-        """Render public lists, interact with date search and load-more controls.
-
-        Return all observed HTML pages, including replaced pagination pages.
-        Unknown UI or CAPTCHA results in a partial/error report, not an empty success.
-        """
         from .extract import listing_candidates
         pages, ids, stale = [], set(), 0
         page = await self._open(url)
         try:
             if source == "e_disclosure":
-                # Use the site's own search form; do not invent a private API URL.
                 date_picker = page.get_by_text('Выбрать дату публикации', exact=False)
                 if await date_picker.count() and await date_picker.first.is_visible():
                     await date_picker.first.click()
@@ -361,13 +339,11 @@ class Transport:
                     for item, date in zip(dated[:2], (cutoff.astimezone(MSK), datetime.now(MSK))):
                         value = date.strftime("%Y-%m-%d") if await item.get_attribute("type") == "date" else date.strftime("%d.%m.%Y")
                         await item.fill(value)
-                    # The date range is selected in a modal on the legacy portal.
                     confirm = page.get_by_role('button', name='Подтвердить выбор', exact=True)
                     for item in await confirm.all():
                         if await item.is_visible():
                             await item.click()
                             break
-                # Several modal dialogs also have 'Искать'; select a visible search action.
                 for control in await page.locator('button, input[type="submit"], input[type="button"], a.btn').all():
                     label = (await control.inner_text()) or (await control.get_attribute("value")) or ""
                     if await control.is_visible() and label.strip() in {"Искать", "Поиск", "Найти"}:
@@ -383,7 +359,6 @@ class Transport:
                 stale = stale + 1 if len(ids) == old else 0
                 if len(ids) >= target or stale >= 3:
                     break
-                # Explicit pagination is preferable to infinite scroll when available.
                 clicked = False
                 for control in await page.locator('a, button, input[type="button"], input[type="submit"]').all():
                     label = ((await control.inner_text()) or (await control.get_attribute("value")) or "").strip()

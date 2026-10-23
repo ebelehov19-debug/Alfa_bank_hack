@@ -1,9 +1,9 @@
-"""Deterministic extraction: prefer structured article data, then source selectors."""
 from __future__ import annotations
 
 import html
 import json
 import re
+from datetime import datetime
 from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
@@ -21,7 +21,6 @@ def clean_text(value: str) -> str:
     soup = soup_of(value)
     for tag in soup.select("script, style, nav, footer, header, aside, form, button, iframe"):
         tag.decompose()
-    # Keep paragraph boundaries without introducing a newline at every inline tag.
     for tag in soup.select("br"):
         tag.replace_with("\n")
     for tag in soup.select("p, div, li, tr, h1, h2, h3"):
@@ -44,7 +43,6 @@ def rss_candidates(raw: str, source: str) -> list[Candidate]:
         cats = [t.term for t in entry.get("tags", []) if t.get("term")]
         if source == "tass" and not urlsplit(url).path.startswith("/ekonomika/"):
             continue
-        # RSS description is generally a teaser; only content:encoded is a body.
         body = "\n".join(clean_text(c.value) for c in entry.get("content", []) if c.get("value"))
         result.append(Candidate(url, html.unescape(entry.get("title", "")),
                                 parse_date(entry.get("published")), cats, text=body))
@@ -81,7 +79,9 @@ BODY_SELECTORS = {
 }
 
 
-def article_from_html(raw: str, source: str, candidate: Candidate) -> Candidate:
+def article_from_html(raw: str, source: str, candidate: Candidate, *,
+                      observed_at: datetime | None = None,
+                      started_at: datetime | None = None, rendered: bool = False) -> Candidate:
     soup = soup_of(raw)
     if is_challenge(raw):
         raise ValueError('Visitor check instead of an article')
@@ -94,7 +94,8 @@ def article_from_html(raw: str, source: str, candidate: Candidate) -> Candidate:
         raise ValueError('Access challenge instead of an article')
     if source == 'tass':
         from .tass_extract import extract_tass
-        return extract_tass(raw, candidate)
+        return extract_tass(raw, candidate, observed_at=observed_at, started_at=started_at,
+                            rendered=rendered)
     result = Candidate(**vars(candidate))
     for node in jsonld_nodes(soup):
         result.title = clean_text(node.get("headline", "")) or result.title
@@ -118,8 +119,6 @@ def article_from_html(raw: str, source: str, candidate: Candidate) -> Candidate:
             if result.published_at:
                 break
     if source == "e_disclosure":
-        # The event header is separate from the numbered disclosure body.
-        # Do not parse dates from the legal body: those may be event/signature dates.
         header = soup.select_one('#cont_wrap') or soup.select_one('#content') or soup.select_one('main') or soup
         if header:
             header_copy = soup_of(str(header))
@@ -152,7 +151,6 @@ def article_from_html(raw: str, source: str, candidate: Candidate) -> Candidate:
         if re.search(r'1\.\s*Общие сведения', text):
             result.text = text
     if source == 'e_disclosure' and result.text:
-        # Broad legacy wrappers include company navigation and sidebar news.
         marker = re.search(r'1\.\s*Общие сведения', result.text)
         if marker:
             result.text = result.text[marker.start():]
@@ -175,7 +173,6 @@ def listing_candidates(raw: str, base: str, source: str) -> list[Candidate]:
             continue
         if not PATTERNS[source].search(urlsplit(url).path):
             continue
-        # Do not admit another source's links found in article text or navigation.
         host = urlsplit(url).hostname.removeprefix('www.')
         expected = {"tass": "tass.ru", "moex": "moex.com", "e_disclosure": "e-disclosure.ru"}[source]
         if host != expected:
@@ -184,7 +181,6 @@ def listing_candidates(raw: str, base: str, source: str) -> list[Candidate]:
         time = container.select_one('time') if container else None
         date = parse_date(time.get('datetime', time.get_text(" ", strip=True))) if time else None
         if not date and container:
-            # Only explicit date+time, never a time-only homepage stamp.
             date = parse_date(container.get_text(" ", strip=True))
         issuer = None
         if source == "e_disclosure" and container:

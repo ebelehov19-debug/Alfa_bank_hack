@@ -72,7 +72,6 @@ class Source:
                 result.discovery_ok = True
             except Exception as exc:
                 result.warnings.append(f"RSS unavailable, using HTML: {exc}")
-        # RSS is finite and can cover less than 48h, especially TASS. Supplement it.
         url, visited = self.listing_url, set()
         http_failed = False
         for _ in range(self.settings.max_pages):
@@ -140,8 +139,6 @@ class Source:
         except Exception as exc:
             result.errors.append(f"Discovery failed: {exc}")
             return result
-        # Sort known dates newest first; unknown-date list links retain list order.
-        # Hydrate unknown dates too, then sort final articles by actual publication.
         candidates.sort(key=lambda c: c.published_at or now, reverse=True)
         all_dated = all(c.published_at for c in candidates)
         unique, accepted, failure_streak = set(), [], 0
@@ -173,7 +170,6 @@ class Source:
                                         full.text.strip(), full.published_at, now,
                                         list(dict.fromkeys(full.categories)), full.issuer))
             except Exception as exc:
-                # Failed articles are NOT marked seen and can be retried next run.
                 result.errors.append(f"Article {candidate.url}: {exc}")
                 failure_streak += 1
                 if failure_streak >= 5:
@@ -245,7 +241,6 @@ class Tass(Source):
     listing_url = "https://tass.ru/ekonomika"
 
     def __init__(self, transport, settings):
-        # Route only this source through its own stable browser readers.
         class TassTransport:
             def __getattr__(self, name):
                 return getattr(transport, name)
@@ -261,6 +256,7 @@ class Tass(Source):
     async def hydrate(self, candidate, result):
         from .tass_extract import clean_tass_text, invalid_fields
         from dataclasses import replace
+        from .models import UTC
         best = None
         if candidate.text:
             best = replace(candidate, text=clean_tass_text(
@@ -269,22 +265,25 @@ class Tass(Source):
                 return best
         if not self._browser_only:
             try:
+                started_at = datetime.now(UTC)
                 raw = await self.transport.get(candidate.url)
-                best = article_from_html(raw, self.name, candidate)
+                best = article_from_html(raw, self.name, candidate,
+                                         observed_at=datetime.now(UTC), started_at=started_at)
                 if not invalid_fields(best):
                     result.methods.append('http_html')
                     return best
             except Exception as exc:
                 message = str(exc).lower()
                 if '403' in message or 'javascript access check' in message:
-                    # One access check is enough to select the browser for the
-                    # remaining articles in this run; avoid repeated noisy GETs.
                     self._browser_only = True
                 log.debug('TASS HTTP fallback: %s', exc)
         if self.settings.browser:
             try:
+                started_at = datetime.now(UTC)
                 raw = await self.transport.render(candidate.url)
-                browser_article = article_from_html(raw, self.name, candidate)
+                browser_article = article_from_html(raw, self.name, candidate,
+                                                    observed_at=datetime.now(UTC), started_at=started_at,
+                                                    rendered=True)
                 result.methods.append('chromium_html')
                 if best and not browser_article.published_at:
                     browser_article.published_at = best.published_at
@@ -306,12 +305,9 @@ class Tass(Source):
 
 class EDisclosure(Source):
     name = "e_disclosure"
-    # The advertised API gateway requires a separate contract. No fake public API.
     listing_url = "https://www.e-disclosure.ru/poisk-po-soobshheniyam"
 
     async def discover(self, cutoff, now, result, target):
-        # The landing page initializes the public visitor session and also has
-        # a real feed. Keep those messages if the separate search UI is unavailable.
         home = 'https://www.e-disclosure.ru/'
         initial = []
         try:

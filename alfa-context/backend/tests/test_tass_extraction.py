@@ -1,4 +1,3 @@
-"""Regressions from the user's real TASS export, plus synthetic HTML/JS cases."""
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
@@ -28,7 +27,6 @@ def test_real_export_keeps_factual_paragraphs_without_page_chrome(row):
     for label in ('ГлавнаяЭкономика', 'Редакция сайта ТАСС', 'Читайте ТАСС в', 'Читайте также', '©'):
         assert label not in text
     assert row['title'] not in text.splitlines()
-    # Long source paragraphs contain facts/quotes; cleanup must not rewrite them.
     paragraphs = [p for p in row['text'].splitlines() if len(p) > 180 or
                   p.startswith('"') or '/ТАСС/.' in p or '/Корр.' in p]
     assert paragraphs
