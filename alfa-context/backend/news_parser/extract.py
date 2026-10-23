@@ -74,8 +74,6 @@ BODY_SELECTORS = {
              '[class*="NewsContent_text"]', '[class*="Text_text"]', 'article'],
     "moex": ['[itemprop="articleBody"]', '.news-detail__content', '.news__text',
              '.news-content', '.text-block', 'article'],
-    "e_disclosure": ['.disclosure', '.event-message', '#cont_wrap',
-                     '[itemprop="articleBody"]', '#content'],
 }
 
 
@@ -118,26 +116,6 @@ def article_from_html(raw: str, source: str, candidate: Candidate, *,
             result.published_at = parse_date(node.get(attr)) or result.published_at
             if result.published_at:
                 break
-    if source == "e_disclosure":
-        header = soup.select_one('#cont_wrap') or soup.select_one('#content') or soup.select_one('main') or soup
-        if header:
-            header_copy = soup_of(str(header))
-            text = header_copy.get_text(" ", strip=True).split("1. Общие сведения")[0]
-            m = re.search(r"\b\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}(?::\d{2})?", text)
-            if m:
-                result.published_at = parse_date(m[0]) or result.published_at
-            h = header.select_one('h4, h3')
-            if h:
-                result.title = h.get_text(" ", strip=True)
-                result.categories = [result.title]
-            issuer_heading = header.select_one('h2')
-            if issuer_heading:
-                result.issuer = issuer_heading.get_text(" ", strip=True)
-        issuer = soup.select_one('a[href*="company.aspx?id="], a[href*="company.aspx?ID="]')
-        if issuer and not result.issuer:
-            issuer_text = issuer.get_text(" ", strip=True)
-            if issuer_text not in {"Карточка компании", "Компания"}:
-                result.issuer = issuer_text
     if not result.text:
         for selector in BODY_SELECTORS[source]:
             node = soup.select_one(selector)
@@ -146,25 +124,17 @@ def article_from_html(raw: str, source: str, candidate: Candidate, *,
                 if len(text) >= 40:
                     result.text = text
                     break
-    if source == 'e_disclosure' and not result.text:
-        text = clean_text(str(header))
-        if re.search(r'1\.\s*Общие сведения', text):
-            result.text = text
-    if source == 'e_disclosure' and result.text:
-        marker = re.search(r'1\.\s*Общие сведения', result.text)
-        if marker:
-            result.text = result.text[marker.start():]
-            result.text = result.text.split('Настоящее сообщение предоставлено')[0].strip()
     return result
 
 
 PATTERNS = {"tass": re.compile(r"^/ekonomika/\d+/?$"),
-            "moex": re.compile(r"^/[a-z]{1,3}/n\d+/?$|^/n\d+/?$"),
-            "e_disclosure": re.compile(r"^/portal/event\.aspx$", re.I)}
+            "moex": re.compile(r"^/[a-z]{1,3}/n\d+/?$|^/n\d+/?$")}
 
 
 def listing_candidates(raw: str, base: str, source: str) -> list[Candidate]:
     soup = soup_of(raw)
+    if source == 'tass':
+        soup = soup.select_one('[class*="FeedPageContainer_wrapper"]') or soup
     found = {}
     for a in soup.select('a[href]'):
         try:
@@ -174,7 +144,7 @@ def listing_candidates(raw: str, base: str, source: str) -> list[Candidate]:
         if not PATTERNS[source].search(urlsplit(url).path):
             continue
         host = urlsplit(url).hostname.removeprefix('www.')
-        expected = {"tass": "tass.ru", "moex": "moex.com", "e_disclosure": "e-disclosure.ru"}[source]
+        expected = {"tass": "tass.ru", "moex": "moex.com"}[source]
         if host != expected:
             continue
         container = a.find_parent('tr') or a.find_parent('article') or a.parent
@@ -183,10 +153,8 @@ def listing_candidates(raw: str, base: str, source: str) -> list[Candidate]:
         if not date and container:
             date = parse_date(container.get_text(" ", strip=True))
         issuer = None
-        if source == "e_disclosure" and container:
-            c = container.select_one('a[href*="company.aspx"]')
-            issuer = c.get_text(" ", strip=True) if c else None
-        candidate = Candidate(url, a.get_text(" ", strip=True), date, issuer=issuer)
+        categories = ['Экономика и бизнес'] if source == 'tass' else []
+        candidate = Candidate(url, a.get_text(" ", strip=True), date, categories=categories, issuer=issuer)
         if url not in found or (date and not found[url].published_at):
             found[url] = candidate
     return list(found.values())

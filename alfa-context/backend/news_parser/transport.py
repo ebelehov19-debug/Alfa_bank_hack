@@ -24,7 +24,6 @@ class FetchError(RuntimeError):
 
 
 class Transport:
-
     def __init__(self, settings: Settings, client=None):
         self.settings = settings
         self.client = client or httpx.AsyncClient(
@@ -285,10 +284,15 @@ class Transport:
 
     async def tass_listing(self, url, source, target, cutoff):
         from .extract import listing_candidates
+        from .tass_scroll import FEED_ROOT, FEED_CARDS, FEED_LOADER, SCROLL_FEED, FEED_GREW
+        from playwright.async_api import TimeoutError as BrowserTimeoutError
         page = await self._tass_page(url)
-        pages, ids, stale = [], set(), 0
+        pages, ids = [], set()
+        selectors = dict(rootSelector=FEED_ROOT, cardSelector=FEED_CARDS,
+                         loaderSelector=FEED_LOADER)
+        load_timeout = min(self.settings.browser_timeout, self.settings.timeout) * 1000
         try:
-            for _ in range(self.settings.max_pages):
+            for index in range(self.settings.max_pages):
                 try:
                     raw = await self._tass_snapshot(page, url)
                 except Exception:
@@ -297,22 +301,33 @@ class Transport:
                         break
                     raise
                 pages.append(raw)
-                before = len(ids)
                 ids.update(c.url for c in listing_candidates(raw, url, 'tass'))
-                stale = stale + 1 if before == len(ids) else 0
-                if len(ids) >= target or stale >= 2:
+                log.info('TASS feed: %d unique links after batch %d', len(ids), index + 1)
+                if len(ids) >= target or index + 1 == self.settings.max_pages:
                     break
-                import re as regex
-                buttons = page.get_by_role('button', name=regex.compile(r'^(?:Показать|Загрузить)\s+ещ[её]$', regex.I))
-                clicked = False
-                for button in await buttons.all():
-                    if await button.is_visible() and await button.is_enabled():
-                        await button.click()
-                        clicked = True
+                grew = False
+                for attempt in range(2):
+                    try:
+                        if attempt:
+                            await page.evaluate(SCROLL_FEED, {**selectors, 'reset': True})
+                            await page.wait_for_timeout(100)
+                        if not await page.evaluate(SCROLL_FEED, {**selectors, 'reset': False}):
+                            break
+                        handle = await page.wait_for_function(
+                            FEED_GREW,
+                            arg=dict(rootSelector=FEED_ROOT, cardSelector=FEED_CARDS,
+                                     known=list(ids)), timeout=load_timeout, polling=100)
+                        await handle.dispose()
+                        grew = True
                         break
-                if not clicked:
-                    await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                await page.wait_for_timeout(max(750, self.settings.delay * 1000))
+                    except BrowserTimeoutError:
+                        continue
+                    except Exception:
+                        log.warning('TASS feed navigation failed; keeping %d discovered links', len(ids))
+                        break
+                if not grew:
+                    log.info('TASS feed has no new links after bounded waits; keeping %d links', len(ids))
+                    break
             return pages
         finally:
             await page.close()
@@ -322,34 +337,6 @@ class Transport:
         pages, ids, stale = [], set(), 0
         page = await self._open(url)
         try:
-            if source == "e_disclosure":
-                date_picker = page.get_by_text('Выбрать дату публикации', exact=False)
-                if await date_picker.count() and await date_picker.first.is_visible():
-                    await date_picker.first.click()
-                inputs = page.locator('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])')
-                dated = []
-                for i in range(await inputs.count()):
-                    item = inputs.nth(i)
-                    props = " ".join([(await item.get_attribute(a)) or "" for a in ("id", "name", "class", "placeholder")])
-                    if await item.is_visible() and any(s in props.lower() for s in ("date", "дд.мм", "дата")):
-                        dated.append(item)
-                if len(dated) >= 2:
-                    from .models import MSK
-                    from datetime import datetime
-                    for item, date in zip(dated[:2], (cutoff.astimezone(MSK), datetime.now(MSK))):
-                        value = date.strftime("%Y-%m-%d") if await item.get_attribute("type") == "date" else date.strftime("%d.%m.%Y")
-                        await item.fill(value)
-                    confirm = page.get_by_role('button', name='Подтвердить выбор', exact=True)
-                    for item in await confirm.all():
-                        if await item.is_visible():
-                            await item.click()
-                            break
-                for control in await page.locator('button, input[type="submit"], input[type="button"], a.btn').all():
-                    label = (await control.inner_text()) or (await control.get_attribute("value")) or ""
-                    if await control.is_visible() and label.strip() in {"Искать", "Поиск", "Найти"}:
-                        await control.click()
-                        await page.wait_for_timeout(1500)
-                        break
             for page_index in range(self.settings.max_pages):
                 raw = await page.content()
                 pages.append(raw)

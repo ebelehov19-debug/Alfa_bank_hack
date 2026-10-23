@@ -13,7 +13,7 @@ from news_parser.extract import (article_from_html, clean_text, listing_candidat
                                  next_page, rss_candidates)
 from news_parser.models import (Article, Candidate, Settings, UTC, canonical_url,
                                 news_id, parse_date)
-from news_parser.sources import EDisclosure, Moex, Source, SourceResult, Tass
+from news_parser.sources import Moex, Source, SourceResult, Tass
 from news_parser.storage import Storage, atomic_json
 from news_parser.transport import FetchError, Transport
 
@@ -56,11 +56,8 @@ def test_untrusted_urls_rejected(url):
         canonical_url(url)
 
 
-def test_canonical_ids_preserve_event_value_and_ignore_tracking():
-    a = 'https://www.e-disclosure.ru/portal/event.aspx?EventId=aBc-B-B&utm_source=x#top'
-    b = 'http://e-disclosure.ru/portal/event.aspx?eventid=aBc-B-B'
-    assert news_id('e_disclosure', a) == news_id('e_disclosure', b)
-    assert news_id('e_disclosure', a) != news_id('e_disclosure', b.replace('aBc', 'abc'))
+def test_canonical_ids_ignore_tracking_and_keep_source_identity():
+    assert news_id('tass', 'https://www.tass.ru/ekonomika/42?utm_source=x#top') == news_id('tass', 'http://tass.ru/ekonomika/42')
     assert news_id('moex', 'https://moex.com/ru/n42') == news_id('moex', 'https://www.moex.com/n42')
 
 
@@ -101,16 +98,6 @@ def test_challenge_html_is_not_news_even_with_rss_metadata():
         article_from_html(raw, 'tass', Candidate('https://tass.ru/ekonomika/1', 'Тест', NOW))
 
 
-def test_disclosure_does_not_use_signature_or_event_date_as_publication():
-    raw = f'''<div id="cont_wrap"><h2>ПАО Тест</h2><h4>Решения совета директоров</h4>
-    <div>22.10.2026 21:00</div><a href="/portal/company.aspx?id=1">ПАО Тест</a>
-    <div class="disclosure">1. Общие сведения<p>{BODY}</p><p>Дата сделки 01.01.2020 00:00</p></div></div>'''
-    result = article_from_html(raw, 'e_disclosure', Candidate('https://e-disclosure.ru/portal/event.aspx?EventId=ABC'))
-    assert result.published_at == NOW
-    assert result.issuer == 'ПАО Тест'
-    assert BODY in result.text
-    raw = raw.replace('<div>22.10.2026 21:00</div>', '')
-    assert article_from_html(raw, 'e_disclosure', Candidate('https://e-disclosure.ru/portal/event.aspx?EventId=ABC')).published_at is None
 
 
 def test_listing_domains_dedup_pagination():
@@ -216,7 +203,7 @@ def test_moex_api_failure_uses_rss_then_http():
     r = run(Moex(t, Settings(limit=1)).collect(NOW - timedelta(hours=48), NOW, set()))
     assert len(r.articles) == 1
     assert 'rss' in r.methods and 'chromium_html' in r.methods
-    assert r.warnings
+    assert r.warnings  # API degradation remains visible.
 
 
 def test_http_403_uses_browser_for_listing_and_full_text():
@@ -227,10 +214,6 @@ def test_http_403_uses_browser_for_listing_and_full_text():
     assert 'chromium_html' in r.methods
 
 
-def test_disclosure_unavailable_is_error_not_success_empty():
-    r = run(EDisclosure(MemoryTransport(), Settings(browser=False)).collect(
-        NOW - timedelta(hours=48), NOW, set()))
-    assert r.status == 'error' and r.errors
 
 
 def test_latest_only_state_and_expiry(tmp_path):
@@ -310,6 +293,7 @@ def test_hard_limits(hours, limit):
 
 @pytest.mark.browser
 def test_real_chromium_fallback_with_local_intercepted_documents(monkeypatch):
+    # Chromium executes actual JS, but all requests are intercepted in-process.
     for name in ('HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'https_proxy', 'http_proxy', 'all_proxy'):
         monkeypatch.delenv(name, raising=False)
 
@@ -331,39 +315,3 @@ def test_real_chromium_fallback_with_local_intercepted_documents(monkeypatch):
     run(scenario())
 
 
-@pytest.mark.browser
-def test_disclosure_browser_date_modal_search_and_numeric_pagination(monkeypatch):
-    for name in ('HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'https_proxy', 'http_proxy', 'all_proxy'):
-        monkeypatch.delenv(name, raising=False)
-    raw = '''<meta charset="utf-8">
-    <button onclick="document.getElementById('period').hidden=false">Выбрать дату публикации</button>
-    <div id="period" hidden><input id="dateFrom"><input id="dateTo">
-    <button onclick="this.parentNode.hidden=true">Подтвердить выбор</button></div>
-    <button onclick="if(document.getElementById('dateFrom').value && document.getElementById('dateTo').value) show(1)">Искать</button>
-    <div id="results"></div>
-    <script>
-    function show(n) {
-      const a=document.createElement('a');
-      a.href='/portal/event.aspx?EventId='+n;
-      a.textContent='Решения совета директоров';
-      document.getElementById('results').replaceChildren(a);
-      if(n===1) {
-        const nav=document.createElement('div');nav.className='pagination';
-        const next=document.createElement('a');next.textContent='2';next.href='#';
-        next.onclick=(e)=>{e.preventDefault();show(2)};nav.append(next);
-        document.getElementById('results').append(nav);
-      }
-    }
-    </script>'''
-
-    async def scenario():
-        async with Transport(Settings(timeout=5, delay=0, max_pages=3)) as t:
-            await t._ensure_browser()
-            await t._context.route('**/*', lambda route: route.fulfill(
-                status=200, content_type='text/html; charset=utf-8', body=raw))
-            pages = await t.listing('https://e-disclosure.ru/poisk-po-soobshheniyam',
-                                    'e_disclosure', 2, NOW - timedelta(hours=48))
-            urls = {c.url for p in pages for c in listing_candidates(
-                p, 'https://e-disclosure.ru/poisk-po-soobshheniyam', 'e_disclosure')}
-            assert len(urls) == 2
-    run(scenario())

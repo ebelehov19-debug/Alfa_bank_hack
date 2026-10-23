@@ -26,11 +26,11 @@ def test_allowlist_still_rejects_other_domains(host):
 
 
 def test_preserve_request_host_case_and_signed_query_order():
-    value = 'https://www.e-disclosure.ru/portal/event.aspx?EventId=AbC-B-B&sig=X%2BY&attempt=1'
+    value = 'https://www.tass.ru/ekonomika/42?EventId=AbC-B-B&sig=X%2BY&attempt=1'
     assert request_url(value) == value
     assert canonical_url(value) != value
     with pytest.raises(ValueError):
-        request_url('https://e-disclosure.ru.evil.test/')
+        request_url('https://tass.ru.evil.test/')
 
 
 def test_servicepipe_200_is_not_an_article_or_completed_page():

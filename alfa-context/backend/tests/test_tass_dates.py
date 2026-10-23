@@ -42,7 +42,7 @@ def test_display_labels_use_moscow_time_and_first_publication(label, expected):
     '', '22 октября', 'обновлено 22 октября, 23:01', 'обновлено 00:28',
     '25:28', '00:60', '31 февраля, 21:52', '22 октября 2026, 99:00',
     'Компания выступила в 00:28', '22 октября 2026 года компания сообщила в 21:52',
-    '23:59',  # Future time today must never be guessed to mean yesterday.
+    '23:59', 
 ])
 def test_invalid_or_non_publication_labels_are_not_invented(label):
     assert parse_tass_display_date(label, observed_at=OBSERVED) is None

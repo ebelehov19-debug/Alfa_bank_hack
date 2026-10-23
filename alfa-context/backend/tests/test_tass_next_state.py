@@ -1,3 +1,9 @@
+"""Regression: actual TASS HTML supplied by the user, article 28243979.
+
+The fixture preserves the original author/date block, all article paragraphs
+and the two scripts containing publication metadata; unrelated page chrome,
+ads and embedded base64 images were removed to keep it small.
+"""
 import asyncio
 from datetime import datetime, timedelta
 import json

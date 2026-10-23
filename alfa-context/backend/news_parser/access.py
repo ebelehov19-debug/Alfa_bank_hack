@@ -1,3 +1,4 @@
+"""Recognize access-check documents before treating them as article HTML."""
 import re
 
 
@@ -26,11 +27,6 @@ def has_source_content(raw: str, url: str) -> bool:
         if re.search(r'/ekonomika/\d+', p.path):
             return bool(re.search(r'<article\b|itemprop=[\"\x27]articlebody|newsarticle|class=[\"\x27][^\"\x27]*(?:news-content|text-block)', lower))
         return bool(re.search(r'<a\b[^>]+href=[\"\x27][^\"\x27]*/ekonomika/\d+', lower))
-    if p.hostname in {'e-disclosure.ru', 'www.e-disclosure.ru'}:
-        if '/portal/event.aspx' in p.path.lower():
-            return 'общие сведения' in lower or ('newsarticle' in lower and 'articlebody' in lower)
-        return ('выбрать дату публикации' in lower or
-                bool(re.search(r'<a\b[^>]+href=[\"\x27][^\"\x27]*event\.aspx\?', lower)))
     return True
 
 
@@ -38,6 +34,6 @@ def browser_request_allowed(url: str, resource_type: str) -> bool:
     from urllib.parse import urlsplit
     from .models import HOSTS
     host = urlsplit(url).hostname or ''
-    official = host in HOSTS or host.endswith(('.tass.ru', '.moex.com', '.e-disclosure.ru'))
+    official = host in HOSTS or host.endswith(('.tass.ru', '.moex.com'))
     access_service = host == 'servicepipe.tech' or host.endswith('.servicepipe.tech')
     return resource_type != 'media' and (official or access_service)

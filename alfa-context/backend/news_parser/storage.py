@@ -64,6 +64,8 @@ class Storage:
             raise ValueError("Unrecognized state.json; refusing to silently reset deduplication")
         result = {}
         for key, value in data['seen'].items():
+            if not key.startswith(tuple(source + ':' for source in SOURCES)):
+                continue
             date = parse_date(value)
             if not date:
                 raise ValueError("Invalid publication timestamp in state.json")
@@ -87,8 +89,17 @@ class Storage:
             return
         files = json.loads(pending.read_text(encoding="utf-8"))
         expected = {*(f"{s}.json" for s in SOURCES), "news.json", "state.json", "run_report.json"}
+        if set(files) == expected | {'e_disclosure.json'}:
+            files.pop('e_disclosure.json')
+            files['news.json'] = [row for row in files['news.json'] if row['source'] in SOURCES]
+            files['state.json']['seen'] = {k: v for k, v in files['state.json']['seen'].items()
+                                            if k.startswith(tuple(s + ':' for s in SOURCES))}
+            report = files['run_report.json']
+            report['sources'] = {s: report['sources'][s] for s in SOURCES}
+            report['count'] = len(files['news.json'])
         if set(files) != expected:
             raise ValueError("Invalid pending transaction")
         for name in [*(f"{s}.json" for s in SOURCES), "news.json", "state.json", "run_report.json"]:
             atomic_json(self.directory / name, files[name])
         pending.unlink()
+        (self.directory / 'e_disclosure.json').unlink(missing_ok=True)

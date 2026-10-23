@@ -10,9 +10,8 @@ from email.utils import parsedate_to_datetime
 
 UTC = timezone.utc
 MSK = ZoneInfo("Europe/Moscow")
-SOURCES = ("moex", "tass", "e_disclosure")
-HOSTS = {"www.moex.com", "moex.com", "iss.moex.com", "tass.ru", "www.tass.ru",
-         "e-disclosure.ru", "www.e-disclosure.ru"}
+SOURCES = ("moex", "tass")
+HOSTS = {"www.moex.com", "moex.com", "iss.moex.com", "tass.ru", "www.tass.ru"}
 
 
 def request_url(value: str) -> str:
@@ -39,13 +38,13 @@ def canonical_url(value: str) -> str:
 
 
 def news_id(source: str, url: str) -> str:
+    if source not in SOURCES:
+        raise ValueError(f'Unsupported news source: {source}')
     p = urlsplit(canonical_url(url))
     if source == "moex" and (m := re.search(r"/n(\d+)", p.path)):
         key = m[1]
     elif source == "tass" and (m := re.search(r"/(\d+)/?$", p.path)):
         key = m[1]
-    elif source == "e_disclosure" and (event := dict(parse_qsl(p.query)).get("eventid")):
-        key = event
     else:
         key = canonical_url(url)
     return source + ":" + sha256(key.encode()).hexdigest()[:24]

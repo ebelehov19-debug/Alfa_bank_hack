@@ -8,8 +8,7 @@ from .models import Settings
 from .storage import atomic_json
 from .transport import Transport, FetchError
 
-URLS = {'tass': 'https://tass.ru/ekonomika',
-        'e_disclosure': 'https://www.e-disclosure.ru/poisk-po-soobshheniyam'}
+URLS = {'tass': 'https://tass.ru/ekonomika'}
 
 
 async def prepare(args):
@@ -40,7 +39,7 @@ async def prepare(args):
                     await page.goto(URLS[source], wait_until='domcontentloaded', timeout=30000)
                 except Exception as exc:
                     print(f'{source}: navigation: {exc}')
-                print(f'{source}: дождитесь новостей/формы поиска в браузере. Если показана CAPTCHA, пройдите её вручную.')
+                print(f'{source}: дождитесь новостей в браузере. Если показана CAPTCHA, пройдите её вручную.')
                 await asyncio.to_thread(input, 'Когда нужная страница загрузится, нажмите Enter здесь: ')
                 raw = await page.content()
                 if not has_source_content(raw, URLS[source]):

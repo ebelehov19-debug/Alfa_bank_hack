@@ -143,9 +143,12 @@ class Source:
         all_dated = all(c.published_at for c in candidates)
         unique, accepted, failure_streak = set(), [], 0
         result.discovered = len(candidates)
-        for candidate in candidates:
+        for index, candidate in enumerate(candidates, 1):
             if all_dated and len(accepted) >= self.settings.limit:
                 break
+            if index == 1 or index % 10 == 0:
+                log.info('%s: checking article %d/%d; accepted %d/%d', self.name,
+                         index, len(candidates), len(accepted), self.settings.limit)
             try:
                 candidate.url = request_url(candidate.url)
                 key = news_id(self.name, candidate.url)
@@ -177,6 +180,9 @@ class Source:
                     break
         accepted.sort(key=lambda a: (a.published_at, a.id), reverse=True)
         result.articles = accepted[:self.settings.limit]
+        log.info('%s: completed; exported %d, seen %d, outside window %d, invalid %d',
+                 self.name, len(result.articles), result.already_seen,
+                 result.outside_window, result.invalid)
         return result
 
 
@@ -303,32 +309,6 @@ class Tass(Source):
         return best
 
 
-class EDisclosure(Source):
-    name = "e_disclosure"
-    listing_url = "https://www.e-disclosure.ru/poisk-po-soobshheniyam"
-
-    async def discover(self, cutoff, now, result, target):
-        home = 'https://www.e-disclosure.ru/'
-        initial = []
-        try:
-            try:
-                raw = await self.transport.get(home)
-                method = 'http_html'
-            except Exception:
-                if not self.settings.browser:
-                    raise
-                raw = await self.transport.render(home)
-                method = 'chromium_html'
-            initial = listing_candidates(raw, home, self.name)
-            if initial:
-                result.discovery_ok = True
-                result.methods.append(method)
-        except Exception as exc:
-            log.info('e_disclosure home session bootstrap: %s', exc)
-        if len(initial) >= target:
-            return initial
-        found = await super().discover(cutoff, now, result, target)
-        return list({c.url: c for c in initial + found}.values())
 
 
-ADAPTERS = {"moex": Moex, "tass": Tass, "e_disclosure": EDisclosure}
+ADAPTERS = {"moex": Moex, "tass": Tass}

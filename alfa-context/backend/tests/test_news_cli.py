@@ -16,7 +16,7 @@ from news_parser.transport import Transport
 BODY = 'Тестовые сведения для проверки конвейера: компания раскрыла новую финансовую отчётность.'
 
 
-def test_three_sources_write_compatible_json_then_only_new_batch(tmp_path, monkeypatch):
+def test_two_sources_write_compatible_json_then_only_new_batch(tmp_path, monkeypatch):
     now = datetime.now(timezone.utc)
     date = now.isoformat()
 
@@ -33,8 +33,6 @@ def test_three_sources_write_compatible_json_then_only_new_batch(tmp_path, monke
             return httpx.Response(200, text=f'<rss version="2.0"><channel><item><title>Тест ТАСС</title><link>https://tass.ru/ekonomika/1</link><pubDate>{now.strftime("%a, %d %b %Y %H:%M:%S +0000")}</pubDate></item></channel></rss>')
         if path == '/ekonomika':
             return httpx.Response(200, text=f'<article><time datetime="{date}"></time><a href="/ekonomika/1">Тест ТАСС</a></article>')
-        if 'poisk-po' in path:
-            return httpx.Response(200, text=f'<table><tr><td><time datetime="{date}"></time></td><td><a href="/portal/company.aspx?id=1">ПАО Тест</a></td><td><a href="/portal/event.aspx?EventId=ABC">Раскрытие</a></td></tr></table>')
         raw = '<h1>Тест</h1><script type="application/ld+json">' + json.dumps({
             '@type': 'NewsArticle', 'headline': 'Тест', 'datePublished': date, 'articleBody': BODY}) + '</script>'
         return httpx.Response(200, text=raw)
@@ -43,10 +41,10 @@ def test_three_sources_write_compatible_json_then_only_new_batch(tmp_path, monke
         settings, client=httpx.AsyncClient(transport=httpx.MockTransport(handler))))
     args = argparse.Namespace(hours=48, limit=1, timeout=5, delay=0, retries=0,
                               max_pages=2, no_browser=True, output=tmp_path,
-                              sources=['moex', 'tass', 'e_disclosure'])
+                              sources=['moex', 'tass'])
     code = asyncio.run(cli.run(args))
     assert code == 0
-    assert validate(tmp_path)['count'] == 3
+    assert validate(tmp_path)['count'] == 2
     original_ids = {a['id'] for a in json.loads((tmp_path / 'news.json').read_text())}
     asyncio.run(cli.run(args))
     assert validate(tmp_path)['count'] == 0
