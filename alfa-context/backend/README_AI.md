@@ -11,6 +11,7 @@ API отдаёт сохранённый результат фронту. Клю�
 
 ```powershell
 python -m pip install -r backend/requirements-api.txt
+python -m playwright install chromium
 Copy-Item .env.example .env
 ```
 
@@ -25,10 +26,16 @@ python -m news_api
 ```
 
 Открыть <http://127.0.0.1:8080>. Фронт и API обслуживаются одним сервером.
-На экране ленты нажмите «Анализировать новости». Задание выполняется в фоне,
-интерфейс получает его статус и загружает результат для выбранной компании/роли.
+На экране ленты нажмите «Анализировать новости». Фоновое задание сначала
+запускает парсер MOEX и ТАСС и сохраняет JSON в `data/news/`, затем импортирует
+`news.json` и `batches/*.json` в `data/ai.sqlite` и отправляет тексты Gemma → GLM.
+Интерфейс показывает этапы сбора и анализа и загружает результат для выбранной
+компании/роли. Кнопка работает и без заранее собранных файлов.
 
-Свежие новости предварительно собирает существующий парсер. Из `alfa-context`:
+На Linux при отсутствии системных библиотек Chromium выполните
+`python -m playwright install --with-deps chromium`.
+
+Для отдельного сбора без AI по-прежнему можно запустить парсер из `alfa-context`:
 
 ```powershell
 docker compose build parser
@@ -37,6 +44,11 @@ docker compose run --rm parser
 
 Локальный сбор без Docker описан в [README_NEWS.md](README_NEWS.md).
 Сервер не запускает сбор и платные вызовы автоматически при открытии страницы.
+Сбор ограничен 600 секундами. Если оба источника недоступны либо сбор завершился
+ошибкой/таймаутом, задача останавливается до вызова моделей. Если один источник
+недоступен или обработан частично, анализ использует доступные и сохранённые
+публикации, а интерфейс сообщает о частичном результате. Пустая новая порция
+не удаляет ранее сохранённые порции из `batches/`.
 
 ## Запуск через Docker
 
@@ -46,7 +58,9 @@ docker compose run --rm parser
 docker compose up --build api
 ```
 
-Открыть <http://127.0.0.1:8080>. Новости и AI-хранилище подключены из `data/`.
+Открыть <http://127.0.0.1:8080>. Образ API включает зависимости парсера и Chromium;
+новости и AI-хранилище подключены из `data/`. Отдельный контейнер парсера
+для кнопки анализа не требуется.
 После изменения ключа: `docker compose up --force-recreate api`.
 
 ## Профили компаний
@@ -96,7 +110,7 @@ python backend/core.py --db data/context.sqlite import data
 ограничивает порцию десятью статьями. `LLM_MAX_CALLS_PER_RUN=20` ограничивает
 вызовы в одном запуске, включая повторные HTTP-попытки; `LLM_RETRIES=1` и
 `LLM_TIMEOUT=90` задают повторы и таймаут. `LLM_RUN_TIMEOUT=180` ограничивает
-время одного запуска. Вопрос — отдельный запуск GLM.
+время AI-этапа, отдельно от предшествующего сбора. Вопрос — отдельный запуск GLM.
 
 Дневной бюджет **500 ₽ общий для команды**, его контролирует шлюз. Ограничение
 числа вызовов не гарантирует денежный остаток. При `Budget has been exceeded`
@@ -114,12 +128,14 @@ python backend/core.py --db data/context.sqlite import data
 | `GET /api/health` | Готовность подключения без ключа в ответе |
 | `GET /api/companies` | Доступные профили компаний |
 | `GET /api/feed?company_id=...&role=cfo` | Сохранённая персональная лента |
-| `POST /api/analyze` | `{company_id, role, limit?}` → `202 {job_id}` |
-| `GET /api/jobs/<job_id>` | `queued/running/completed/failed`, результат и ошибки |
+| `POST /api/analyze` | `{company_id, role, limit?}` → `202 {job_id}`, сбор и затем AI-анализ |
+| `GET /api/jobs/<job_id>` | `status`: `queued/running/completed/failed`; `stage`: `queued/parsing/analyzing/completed/failed`; результат и ошибки |
 | `POST /api/questions` | `{company_id, role, news_id, question}` → ответ и источники |
 
 Роли: `cfo`, `ceo`, `treasury`. Сервер по умолчанию слушает только localhost.
-Одновременно выполняется один анализ или вопрос; параллельный запрос получает 409.
+Одновременно выполняется один сбор с анализом или вопрос; параллельный запрос получает 409.
+В `result.collection` доступны число новых публикаций и статусы источников;
+подробная диагностика парсера остаётся в `data/news/run_report.json`.
 Задания прогресса хранятся в памяти, результаты — в SQLite и переживают перезапуск.
 
 ## Проверка без ключа
@@ -127,10 +143,11 @@ python backend/core.py --db data/context.sqlite import data
 Из `alfa-context/backend`, с установленными `pytest` и `requirements-api.txt`:
 
 ```powershell
-python -X utf8 -m pytest -q tests/test_news_ai.py tests/test_news_api.py tests/test_news_e2e.py tests/test_core.py
+python -X utf8 -m pytest -q tests/test_news_ai.py tests/test_news_api.py tests/test_news_e2e.py tests/test_news_collection.py tests/test_news_cli.py tests/test_core.py
 ```
 
 Проверки подменяют ответы моделей и не тратят бюджет. Они проверяют порядок
-Gemma→GLM, отсев, сохранение и повторы после ошибок, контекст компании/роли,
+парсер→JSON-файлы→Gemma→GLM, передачу исходных текстов обоим моделям,
+таймаут сбора, отсев, сохранение и повторы после ошибок, контекст компании/роли,
 валидацию JSON, HTTP API и отсутствие утечки ключа. Реальный вызов шлюза
 необходим после добавления ключа, чтобы подтвердить доступ команды к моделям.

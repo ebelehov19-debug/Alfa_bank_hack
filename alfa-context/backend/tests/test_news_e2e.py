@@ -8,11 +8,13 @@ from uuid import uuid4
 
 import httpx
 
+import news_parser.__main__ as parser
 from news_ai.config import Settings
 from news_ai.pipeline import Pipeline
 from news_ai.store import Store
 from news_api import Application
 from news_parser.models import Article, news_id
+from news_parser.sources import SourceResult
 from news_parser.storage import Storage
 
 
@@ -65,7 +67,10 @@ def test_archived_news_through_http_gemma_glm_persistence_and_question(tmp_path)
     store_path = tmp_path / "ai.sqlite"
     pipeline = Pipeline(settings, Store(store_path), news_dir, client=provider)
     app = Application(settings=settings, companies={"A": company}, pipeline=pipeline,
-                      news_directory=news_dir, frontend_directory=tmp_path)
+                      news_directory=news_dir, frontend_directory=tmp_path,
+                      news_collector=lambda directory: {"count": 0, "sources": {
+                          source: {"status": "ok", "exported": 0} for source in ("moex", "tass")
+                      }})
     server = app.create_server(port=0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
@@ -100,6 +105,98 @@ def test_archived_news_through_http_gemma_glm_persistence_and_question(tmp_path)
         result = restarted.run(company, "cfo")
         assert result["calls"] == 0
         assert Store(store_path).feed("A", "cfo")[0]["id"] == accepted_id
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+        app.close()
+        provider.close()
+
+
+def test_analysis_collects_to_files_then_passes_exact_articles_to_both_models(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    news_dir = tmp_path / "new-news"
+    company = {"company_id": "A", "features": {"MAINOKVED_NAME": "Строительство"},
+               "limitations": ["Условия кредитования неизвестны."]}
+    articles = [Article(news_id(source, url), source, url, title, text,
+                        now - timedelta(minutes=index + 1), now)
+                for index, (source, url, title, text) in enumerate([
+                    ("moex", "https://www.moex.com/n123", "Изменение биржевых условий",
+                     "Биржа опубликовала новые условия торгов для участников рынка.\nПодробности находятся в исходной публикации."),
+                    ("tass", "https://tass.ru/ekonomika/456", "Новость о строительстве",
+                     "Опубликована новость о новых условиях работы строительных компаний.\nИзменения требуют дополнительной проверки."),
+                ])]
+    expected = {article.id: article.to_dict() for article in articles}
+    collected = []
+
+    async def collect(settings, selected, state, observed, transport):
+        assert selected == ["moex", "tass"] and state == {}
+        assert not (news_dir / "news.json").exists()
+        collected.append(True)
+        return [SourceResult(source, articles=[a for a in articles if a.source == source],
+                             discovery_ok=True) for source in selected]
+
+    # Exercise Application's default collector, its real runner and Storage.
+    # Only retrieval and paid model responses are replaced.
+    monkeypatch.setattr(parser, "collect", collect)
+    settings = Settings(api_key="offline-test-key", retries=0)
+    model_calls = []
+
+    def model_response(request):
+        assert collected == [True]
+        files = json.loads((news_dir / "news.json").read_text(encoding="utf-8"))
+        assert {row["id"] for row in files} == set(expected)
+        payload = json.loads(request.content)
+        data = json.loads(payload["messages"][1]["content"])["untrusted_data"]
+        article = data["article"]
+        original = expected[article["id"]]
+        for field in ("id", "title", "text", "url", "source", "published_at"):
+            assert article[field] == original[field], field
+        model_calls.append((payload["model"], article["id"]))
+        if payload["model"] == settings.gemma_model:
+            value = {"relevant": True, "confidence": 0.9, "category": "Экономика", "reason": "Деловая новость."}
+        else:
+            assert payload["model"] == settings.glm_model
+            assert data["company"] == company and data["role"] == "cfo"
+            value = {"type": "neutral", "relevance": 30, "summary": "Новые условия требуют проверки.",
+                     "connection": "Компания работает в строительной отрасли.",
+                     "impact": "Прямое влияние пока не подтверждено.", "action": "Проверить применимость условий.",
+                     "facts": [original["title"]], "uncertainties": ["Условия договоров неизвестны."]}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(value, ensure_ascii=False)}}]})
+
+    provider = httpx.Client(transport=httpx.MockTransport(model_response))
+    store = Store(tmp_path / "ai.sqlite")
+    app = Application(settings=settings, companies={"A": company},
+                      pipeline=Pipeline(settings, store, news_dir, client=provider),
+                      news_directory=news_dir, frontend_directory=tmp_path)
+    server = app.create_server(port=0)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{server.server_port}", trust_env=False) as http:
+            assert http.get("/api/health").json()["news_available"] is False
+            response = http.post("/api/analyze", json={"company_id": "A", "role": "cfo"})
+            assert response.status_code == 202
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                job = http.get("/api/jobs/" + response.json()["job_id"]).json()
+                if job["status"] in {"completed", "failed"}:
+                    break
+                time.sleep(0.01)
+            assert job["status"] == "completed", job
+            assert job["result"]["collection"]["count"] == 2
+            assert job["result"]["counts"]["imported"] == 2
+            assert job["result"]["counts"]["analyzed"] == 2
+            assert job["result"]["errors"] == []
+            assert http.get("/api/health").json()["news_available"] is True
+            assert {item["id"] for item in http.get("/api/feed?company_id=A&role=cfo").json()["items"]} == set(expected)
+        for source in ("moex", "tass"):
+            saved, = json.loads((news_dir / f"{source}.json").read_text(encoding="utf-8"))
+            assert saved == next(article.to_dict() for article in articles if article.source == source)
+            assert (settings.gemma_model, saved["id"]) in model_calls
+            assert (settings.glm_model, saved["id"]) in model_calls
+        assert len(list((news_dir / "batches").glob("*.json"))) == 1
+        assert len(model_calls) == 4
     finally:
         server.shutdown()
         server.server_close()

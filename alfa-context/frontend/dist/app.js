@@ -164,12 +164,15 @@ function changeSelection() {
   loadFeed(context());
 }
 
-const canAnalyze = () => state.available && state.health?.configured && state.health?.news_available && state.companyId && !state.job && !state.booting;
+const canAnalyze = () => state.available && state.health?.configured && state.companyId && !state.job && !state.booting;
+const jobStage = () => state.job?.stage || (state.job?.status === 'queued' ? 'queued' : 'analyzing');
+const jobLabel = () => jobStage() === 'parsing' ? 'Собираем свежие новости…' : jobStage() === 'queued' ? 'Подготавливаем сбор…' : 'Анализируем новости…';
+const jobHint = () => jobStage() === 'parsing' ? 'Загружаем публикации MOEX и ТАСС' : jobStage() === 'queued' ? 'Ожидаем начала сбора новостей' : 'Сопоставляем публикации с контекстом компании';
 
 async function analyze() {
   if (!canAnalyze()) return;
   const ctx = context();
-  state.job = {id: '', started: Date.now(), status: 'queued'};
+  state.job = {id: '', started: Date.now(), status: 'queued', stage: 'queued'};
   state.notice = '';
   closeDetail();
   render();
@@ -195,6 +198,7 @@ async function pollJob(ctx, id) {
     if (!current(ctx) || state.job?.id !== id) return;
     if (job.status === 'completed') {
       state.job = null;
+      if (job.result?.collection && state.health) state.health.news_available = true;
       const errors = Array.isArray(job.result?.errors) ? job.result.errors.length : Number(job.result?.counts?.errors) || 0;
       const budgetExceeded = Array.isArray(job.result?.errors) && job.result.errors.some(error => error?.code === 'budget_exceeded');
       state.notice = budgetExceeded ? `${budgetMessage} Уже полученные результаты доступны в ленте.` : errors ? 'Анализ завершён частично: некоторые публикации не удалось обработать. Доступные результаты показаны в ленте.' : 'Анализ завершён. Лента обновлена с учётом компании и вашей роли.';
@@ -204,7 +208,7 @@ async function pollJob(ctx, id) {
     }
     if (job.status === 'failed') {
       state.job = null;
-      state.notice = 'Не удалось завершить анализ. Попробуйте ещё раз. Ранее полученные результаты доступны в ленте.';
+      state.notice = typeof job.error === 'string' && job.error ? job.error : 'Не удалось завершить анализ. Попробуйте ещё раз. Ранее полученные результаты доступны в ленте.';
       state.noticeKind = 'error';
       await loadFeed(ctx);
       return;
@@ -217,8 +221,10 @@ async function pollJob(ctx, id) {
       render();
       return;
     }
-    const changed = state.job.status !== job.status;
+    const stage = job.stage || (job.status === 'queued' ? 'queued' : 'analyzing');
+    const changed = state.job.status !== job.status || state.job.stage !== stage;
     state.job.status = job.status;
+    state.job.stage = stage;
     if (changed) render();
     pollTimer = setTimeout(() => pollJob(ctx, id), 1500);
   } catch (error) {
@@ -246,8 +252,9 @@ function renderStatus() {
   } else if (!state.health?.configured) {
     banner.classList.add('warning');
     banner.innerHTML = '<span>Анализ станет доступен после настройки подключения моделей.</span><button class="link-btn" id="retryConnection">Проверить подключение</button>';
-  } else if (!state.health.news_available) banner.innerHTML = '<span>Собранных новостей пока нет. После сбора публикаций можно будет запустить анализ.</span><button class="link-btn" id="retryConnection">Проверить новости</button>';
-  else banner.innerHTML = '<span class="status-dot"></span><span>Новости готовы к анализу. Выберите компанию и роль, чтобы получить персональный разбор.</span>';
+  } else if (state.job) banner.innerHTML = `<span class="status-dot"></span><span>${jobLabel()}</span>`;
+  else if (!state.health.news_available) banner.innerHTML = '<span>Собранных новостей пока нет. Нажмите «Анализировать новости»: сначала сервис соберёт свежие публикации, затем подготовит разбор.</span>';
+  else banner.innerHTML = '<span class="status-dot"></span><span>Выберите компанию и роль. При запуске анализа сервис сначала обновит новости.</span>';
   if ($('#retryConnection')) $('#retryConnection').onclick = initialize;
 }
 
@@ -265,7 +272,7 @@ function rail() {
 function renderFeed() {
   const p = company().payments;
   const count = state.page === 'saved' ? state.items.filter(isSaved).length : state.items.length;
-  $('#view').innerHTML = `<div class="analysis-controls"><div><button class="red-button analyze-button" id="analyzeNews" ${canAnalyze() ? '' : 'disabled'}>${state.job ? 'Анализируем новости…' : 'Анализировать новости'}</button><button class="link-btn refresh-button" id="refreshFeed" ${state.loading || state.booting || !state.available ? 'disabled' : ''}>Обновить ленту</button></div><span class="hint" role="status">${state.job ? (state.job.status === 'queued' ? 'Ожидаем начала обработки' : 'Сопоставляем публикации с контекстом компании') : 'Разбор учитывает выбранную компанию и роль'}</span></div>${state.notice ? `<div class="analysis-notice ${esc(state.noticeKind)}" role="status">${esc(state.notice)}</div>` : ''}<div class="metrics">${metric(state.page === 'saved' ? 'Сохранённых событий' : 'Событий в ленте', num(count), 'Для выбранной компании и роли')}${metric('Входящих контрагентов', num(p.incoming.counterparty_count), 'По предоставленным платежам')}${metric('Концентрация топ-5', pct(p.incoming.top_5_concentration), 'Доля входящего объёма')}</div><div class="feed-layout"><section><div class="toolbar"><div class="tabs"><button data-filter="all">Все события</button><button data-filter="risk">Риски</button><button data-filter="opportunity">Возможности</button></div><input class="search" id="search" aria-label="Поиск событий" placeholder="Поиск по ленте" value="${esc(state.query)}"></div><div class="cards" id="cards" aria-live="polite" aria-busy="${state.loading}"></div></section>${rail()}</div>`;
+  $('#view').innerHTML = `<div class="analysis-controls"><div><button class="red-button analyze-button" id="analyzeNews" ${canAnalyze() ? '' : 'disabled'}>${state.job ? jobLabel() : 'Анализировать новости'}</button><button class="link-btn refresh-button" id="refreshFeed" ${state.loading || state.booting || !state.available ? 'disabled' : ''}>Обновить ленту</button></div><span class="hint" role="status">${state.job ? jobHint() : 'Сначала собираем свежие новости, затем готовим разбор для компании и роли'}</span></div>${state.notice ? `<div class="analysis-notice ${esc(state.noticeKind)}" role="status">${esc(state.notice)}</div>` : ''}<div class="metrics">${metric(state.page === 'saved' ? 'Сохранённых событий' : 'Событий в ленте', num(count), 'Для выбранной компании и роли')}${metric('Входящих контрагентов', num(p.incoming.counterparty_count), 'По предоставленным платежам')}${metric('Концентрация топ-5', pct(p.incoming.top_5_concentration), 'Доля входящего объёма')}</div><div class="feed-layout"><section><div class="toolbar"><div class="tabs"><button data-filter="all">Все события</button><button data-filter="risk">Риски</button><button data-filter="opportunity">Возможности</button></div><input class="search" id="search" aria-label="Поиск событий" placeholder="Поиск по ленте" value="${esc(state.query)}"></div><div class="cards" id="cards" aria-live="polite" aria-busy="${state.loading}"></div></section>${rail()}</div>`;
   $('#analyzeNews').onclick = analyze;
   $('#refreshFeed').onclick = () => loadFeed(context());
   document.querySelectorAll('[data-filter]').forEach(button => {
@@ -284,7 +291,7 @@ function renderCards() {
   else if (state.feedError) message = 'Не удалось обновить ленту. Попробуйте ещё раз.';
   else if (state.items.length && !list.length) message = 'Событий с такими условиями нет. Измените фильтр или поисковый запрос.';
   else if (!state.health?.configured && !state.items.length) message = 'Анализ станет доступен после настройки подключения моделей.';
-  else if (!state.health?.news_available && !state.items.length) message = 'Собранных публикаций пока нет.';
+  else if (!state.health?.news_available && !state.items.length) message = 'Нажмите «Анализировать новости», чтобы собрать публикации и получить персональный разбор.';
   const warning = state.feedError && list.length ? '<div class="analysis-notice warning" role="status">Не удалось обновить ленту. Показаны ранее загруженные результаты.</div>' : '';
   $('#cards').innerHTML = warning + (list.map(card).join('') || `<div class="empty" role="status">${esc(message)}</div>`);
   bind();

@@ -18,6 +18,7 @@ from core import profile
 from news_ai.config import Settings
 from news_ai.pipeline import Pipeline
 from news_ai.store import Store, digest
+from news_parser.runner import collect_news
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +34,7 @@ class APIError(Exception):
 
 class Application:
     def __init__(self, settings=None, context_db=None, ai_db=None, news_directory=None,
-                 frontend_directory=None, companies=None, pipeline=None):
+                 frontend_directory=None, companies=None, pipeline=None, news_collector=None):
         self.settings = settings if settings is not None else Settings.from_env()
         self.context_db = Path(context_db or os.getenv("CONTEXT_DB", ROOT / "data/context.sqlite"))
         self.news_directory = Path(news_directory or os.getenv("NEWS_DIRECTORY", ROOT / "data/news"))
@@ -43,6 +44,7 @@ class Application:
             self.settings, Store(Path(ai_db or os.getenv("AI_DB", ROOT / "data/ai.sqlite"))),
             self.news_directory,
         )
+        self.news_collector = news_collector if news_collector is not None else collect_news
         self._jobs = {}
         self._jobs_lock = threading.Lock()
         self._model_lock = threading.Lock()
@@ -105,7 +107,8 @@ class Application:
                 if finished is None:
                     break
                 del self._jobs[finished]
-            self._jobs[job_id] = {"id": job_id, "status": "queued", "result": None, "error": None}
+            self._jobs[job_id] = {"id": job_id, "status": "queued", "stage": "queued",
+                                  "result": None, "error": None}
         try:
             self._executor.submit(self._run_job, job_id, company, role, limit)
         except Exception:
@@ -115,15 +118,42 @@ class Application:
 
     def _run_job(self, job_id, company, role, limit):
         with self._jobs_lock:
-            self._jobs[job_id]["status"] = "running"
+            self._jobs[job_id].update(status="running", stage="parsing")
+        stage = "parsing"
         try:
-            result = self.pipeline.run(company, role, limit=limit)
+            report = self.news_collector(self.news_directory)
+            # Keep detailed diagnostics in run_report.json. Only known, safe
+            # fields and messages cross the public API boundary.
+            collection = {"count": report["count"], "sources": {
+                source: {"status": report["sources"][source]["status"],
+                         "exported": report["sources"][source]["exported"]}
+                for source in ("moex", "tass")
+            }}
+            if all(source["status"] == "error" for source in collection["sources"].values()):
+                raise RuntimeError("News sources unavailable")
+            collection_errors = [
+                {"stage": "parsing", "code": "source_incomplete", "source": source,
+                 "message": f"Источник {source.upper()} обработан не полностью. Анализ выполнен по доступным публикациям."}
+                for source, value in collection["sources"].items() if value["status"] != "ok"
+            ]
+            stage = "analyzing"
             with self._jobs_lock:
-                self._jobs[job_id].update(status="completed", result=result)
+                self._jobs[job_id]["stage"] = stage
+            result = self.pipeline.run(company, role, limit=limit)
+            result["collection"] = collection
+            if collection_errors:
+                result.setdefault("errors", []).extend(collection_errors)
+                if "counts" in result:
+                    result["counts"]["errors"] = len(result["errors"])
+            with self._jobs_lock:
+                self._jobs[job_id].update(status="completed", stage="completed", result=result)
         except Exception:
             # Provider exceptions may include Authorization headers, body or URLs.
+            error = ("Не удалось собрать свежие новости. Проверьте доступность источников и установку Chromium; сохранённые результаты доступны в ленте."
+                     if stage == "parsing" else
+                     "Не удалось завершить анализ. Сохранённые результаты доступны в ленте; повторите попытку позже.")
             with self._jobs_lock:
-                self._jobs[job_id].update(status="failed", error="Не удалось завершить анализ. Сохранённые результаты доступны в ленте; повторите попытку позже.")
+                self._jobs[job_id].update(status="failed", stage="failed", error=error)
         finally:
             self._model_lock.release()
 

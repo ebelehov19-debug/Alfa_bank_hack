@@ -121,6 +121,45 @@ async function test(name, task) {
     assert(ctx.query('[data-save]').getAttribute('aria-pressed') === 'false', 'different company does not inherit bookmark');
   });
 
+  await test('Empty news starts collection and displays parsing then analysis', async () => {
+    let polls = 0, finished = false;
+    const ctx = await fixture(scenario({health: {news_available: false}, fetch: path => {
+      if (path.startsWith('/api/feed?')) return response({items: finished ? [item()] : []});
+      if (path === '/api/analyze') return response({job_id: 'fresh-news'});
+      if (path === '/api/jobs/fresh-news') {
+        polls++;
+        finished = polls === 3;
+        return response({status: finished ? 'completed' : 'running',
+          stage: polls === 1 ? 'parsing' : finished ? 'completed' : 'analyzing',
+          result: finished ? {errors: [], collection: {count: 1}} : null});
+      }
+    }}));
+    await until(() => ctx.query('#analyzeNews') && !ctx.query('#analyzeNews').disabled, 'empty-news analysis available');
+    assert(ctx.query('#serviceStatus').textContent.includes('сначала сервис соберёт'), 'first collection explained');
+    ctx.query('#analyzeNews').click();
+    await until(() => ctx.query('#analyzeNews').textContent.includes('Собираем свежие новости'), 'collection stage');
+    assert(ctx.query('#analyzeNews').disabled, 'button stays disabled during collection');
+    await until(() => ctx.query('#analyzeNews').textContent.includes('Анализируем новости'), 'analysis stage');
+    assert(ctx.query('#analyzeNews').disabled, 'button stays disabled during analysis');
+    await until(() => ctx.query('.card') && !ctx.query('#analyzeNews').disabled, 'fresh feed');
+    assert(polls === 3, 'both stages handled with running status');
+    assert(!ctx.query('#serviceStatus').textContent.includes('пока нет'), 'initial empty-news banner cleared');
+  });
+
+  await test('Collection failures display the job error as plain text', async () => {
+    const message = 'Не удалось собрать свежие новости. <img src=x onerror="window.__xss=1">';
+    const ctx = await fixture(scenario({fetch: path => {
+      if (path === '/api/analyze') return response({job_id: 'failed-collection'});
+      if (path === '/api/jobs/failed-collection') return response({status: 'failed', stage: 'failed', error: message});
+    }}));
+    await until(() => ctx.query('#analyzeNews') && !ctx.query('#analyzeNews').disabled, 'analysis available');
+    ctx.query('#analyzeNews').click();
+    await until(() => ctx.query('.analysis-notice'), 'collection failure visible');
+    assert(ctx.query('.analysis-notice').textContent === message, 'job error explains failed stage');
+    assert(!ctx.query('.analysis-notice img') && ctx.window.__xss === 0, 'job error escaped');
+    assert(!ctx.query('#analyzeNews').disabled, 'collection can be retried');
+  });
+
   await test('Background analysis polls, shows partial completion and refreshes feed', async () => {
     let finished = false, polls = 0, posted;
     const ctx = await fixture(scenario({fetch: (path, options) => {

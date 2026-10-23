@@ -25,17 +25,17 @@ async def collect(settings, selected, state, now, transport):
     ))
 
 
-async def run(args):
-    settings = Settings(hours=args.hours, limit=args.limit, timeout=args.timeout,
-                        delay=args.delay, retries=args.retries, max_pages=args.max_pages,
-                        browser=not args.no_browser, browser_timeout=getattr(args, 'browser_timeout', 60),
-                        browser_state=getattr(args, 'browser_state', None) or str(Path(args.output) / '.browser-state.json'))
-    storage = Storage(args.output)
+async def collect_to_directory(settings, output, selected=None):
+    """Collect and durably save a batch using the same path as the CLI."""
+    selected = list(SOURCES) if selected is None else list(selected)
+    if not selected or any(name not in SOURCES for name in selected):
+        raise ValueError("Select at least one supported news source")
+    storage = Storage(output)
     now = datetime.now(UTC)
     with storage.lock():
         state = storage.state(now - timedelta(hours=48))
         async with Transport(settings) as transport:
-            results = await collect(settings, args.sources, state, now, transport)
+            results = await collect(settings, selected, state, now, transport)
         articles = [a for r in results for a in r.articles]
         for article in articles:
             state[article.id] = article.published_at.isoformat()
@@ -48,8 +48,17 @@ async def run(args):
         for result in results:
             report['sources'][result.source] = result.to_dict()
         storage.commit(articles, state, report)
+    return report
+
+
+async def run(args):
+    settings = Settings(hours=args.hours, limit=args.limit, timeout=args.timeout,
+                        delay=args.delay, retries=args.retries, max_pages=args.max_pages,
+                        browser=not args.no_browser, browser_timeout=getattr(args, 'browser_timeout', 60),
+                        browser_state=getattr(args, 'browser_state', None) or str(Path(args.output) / '.browser-state.json'))
+    report = await collect_to_directory(settings, args.output, args.sources)
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    statuses = [r.status for r in results]
+    statuses = [report['sources'][source]['status'] for source in args.sources]
     return 1 if all(s == "error" for s in statuses) else (2 if any(s != "ok" for s in statuses) else 0)
 
 

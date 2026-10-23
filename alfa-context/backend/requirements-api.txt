@@ -1,2 +1,1 @@
-httpx==0.28.1
-tzdata==2025.2
+-r requirements-parser.txt

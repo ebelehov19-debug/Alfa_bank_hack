@@ -63,10 +63,11 @@ class FakePipeline:
 
 
 class RunningAPI:
-    def __init__(self, app, server, pipeline):
+    def __init__(self, app, server, pipeline, collection_calls):
         self.app = app
         self.server = server
         self.pipeline = pipeline
+        self.collection_calls = collection_calls
         self.origin = f"http://127.0.0.1:{server.server_address[1]}"
 
     def request(self, path, method="GET", body=_UNSET, raw=None, headers=None):
@@ -106,7 +107,7 @@ def api_factory(tmp_path):
         "B": {"company_id": "B", "features": {"MAINOKVED_NAME": "Торговля"}, "payments": {}},
     }
 
-    def create(configured=True):
+    def create(configured=True, news_collector=None, news_available=True):
         directory = tmp_path / str(len(instances))
         directory.mkdir()
         frontend = directory / "frontend"
@@ -117,8 +118,19 @@ def api_factory(tmp_path):
         (frontend / "server.py").write_text("private_backend_source = True", encoding="utf-8")
         news = directory / "news"
         news.mkdir()
-        (news / "news.json").write_text("[]", encoding="utf-8")
+        if news_available:
+            (news / "news.json").write_text("[]", encoding="utf-8")
         pipeline = FakePipeline()
+        collection_calls = []
+
+        def collect(directory):
+            collection_calls.append(directory)
+            if news_collector is not None:
+                return news_collector(directory)
+            return {"count": 0, "sources": {
+                source: {"status": "ok", "exported": 0} for source in ("moex", "tass")
+            }}
+
         app = Application(
             settings=FakeSettings(configured),
             context_db=directory / "context.sqlite",
@@ -127,12 +139,13 @@ def api_factory(tmp_path):
             frontend_directory=frontend,
             companies=companies,
             pipeline=pipeline,
+            news_collector=collect,
         )
         server = app.create_server(host="127.0.0.1", port=0)
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
         instances.append((app, server, thread))
-        return RunningAPI(app, server, pipeline)
+        return RunningAPI(app, server, pipeline, collection_calls)
 
     yield create
 
@@ -161,6 +174,7 @@ def test_read_api_and_frontend_work_without_model_key(api_factory):
     assert status == 200
     assert b"Test frontend" in frontend
     assert api.pipeline.calls == []
+    assert api.collection_calls == []
 
 
 @pytest.mark.parametrize("endpoint,body", [
@@ -173,6 +187,7 @@ def test_missing_key_rejects_model_calls_without_executing_pipeline(api_factory,
     assert status == 503
     assert response.get("error")
     assert api.pipeline.calls == []
+    assert api.collection_calls == []
 
 
 def test_analysis_job_and_feed_keep_company_and_role_context(api_factory):
@@ -182,7 +197,12 @@ def test_analysis_job_and_feed_keep_company_and_role_context(api_factory):
     job = api.wait_for_job(body["job_id"])
     assert job["id"] == body["job_id"]
     assert job["status"] == "completed"
-    assert job["result"] == {"classified": 2, "relevant": 1, "analyzed": 1}
+    assert job["stage"] == "completed"
+    assert job["result"] == {"classified": 2, "relevant": 1, "analyzed": 1,
+                             "collection": {"count": 0, "sources": {
+                                 source: {"status": "ok", "exported": 0} for source in ("moex", "tass")
+                             }}}
+    assert api.collection_calls == [api.app.news_directory]
     assert not job.get("error")
     assert api.pipeline.calls[0] == (
         "run", {"company_id": "A", "features": {"MAINOKVED_NAME": "Строительство"}, "payments": {}}, "cfo", 2,
@@ -230,6 +250,7 @@ def test_polling_remains_available_while_model_call_runs(api_factory):
         status, job = api.request(f"/api/jobs/{body['job_id']}")
         assert status == 200
         assert job["status"] == "running"
+        assert job["stage"] == "analyzing"
         assert api.request("/api/health")[0] == 200
         status, error = api.request("/api/analyze", "POST", {"company_id": "B", "role": "ceo"})
         assert status == 409
@@ -237,6 +258,83 @@ def test_polling_remains_available_while_model_call_runs(api_factory):
     finally:
         release.set()
     assert api.wait_for_job(body["job_id"])["status"] == "completed"
+
+
+def test_collection_runs_before_analysis_even_without_saved_news(api_factory):
+    started = threading.Event()
+    release = threading.Event()
+
+    def collect(directory):
+        assert not (directory / "news.json").exists()
+        started.set()
+        assert release.wait(timeout=5), "test did not release collection"
+        return {"count": 0, "sources": {
+            source: {"status": "ok", "exported": 0} for source in ("moex", "tass")
+        }}
+
+    api = api_factory(news_collector=collect, news_available=False)
+    assert api.request("/api/health")[1]["news_available"] is False
+    try:
+        status, body = api.request("/api/analyze", "POST", {"company_id": "A", "role": "cfo"})
+        assert status == 202
+        assert started.wait(timeout=1)
+        status, job = api.request(f"/api/jobs/{body['job_id']}")
+        assert status == 200 and job["status"] == "running" and job["stage"] == "parsing"
+        assert api.pipeline.calls == []
+        assert api.request("/api/health")[0] == 200
+        assert api.request("/api/analyze", "POST", {"company_id": "B", "role": "ceo"})[0] == 409
+        assert api.request("/api/questions", "POST", {
+            "company_id": "A", "role": "cfo", "news_id": "news-1", "question": "Что произошло?",
+        })[0] == 409
+    finally:
+        release.set()
+    assert api.wait_for_job(body["job_id"])["status"] == "completed"
+    assert api.pipeline.calls[0][0] == "run"
+
+
+def test_failed_collection_skips_models_hides_details_and_releases_lock(api_factory):
+    def collect(directory):
+        raise RuntimeError("private-cookie-and-upstream-token")
+
+    api = api_factory(news_collector=collect)
+    status, body = api.request("/api/analyze", "POST", {"company_id": "A", "role": "cfo"})
+    assert status == 202
+    job = api.wait_for_job(body["job_id"])
+    assert job["status"] == "failed"
+    assert job["error"] and "private-cookie" not in json.dumps(job)
+    assert api.pipeline.calls == []
+    api.app.news_collector = lambda directory: {"count": 0, "sources": {
+        source: {"status": "ok", "exported": 0} for source in ("moex", "tass")
+    }}
+    status, body = api.request("/api/analyze", "POST", {"company_id": "A", "role": "cfo"})
+    assert status == 202
+    assert api.wait_for_job(body["job_id"])["status"] == "completed"
+
+
+@pytest.mark.parametrize("statuses,expected", [(("error", "error"), "failed"),
+                                                (("ok", "error"), "completed"),
+                                                (("partial", "ok"), "completed")])
+def test_source_failures_stop_all_failed_collection_or_report_partial_result(api_factory, statuses, expected):
+    def collect(directory):
+        return {"count": 1, "sources": {
+            source: {"status": status, "exported": 1 if status != "error" else 0,
+                     "errors": ["private-parser-diagnostic"]}
+            for source, status in zip(("moex", "tass"), statuses)
+        }}
+
+    api = api_factory(news_collector=collect)
+    status, body = api.request("/api/analyze", "POST", {"company_id": "A", "role": "cfo"})
+    assert status == 202
+    job = api.wait_for_job(body["job_id"])
+    assert job["status"] == expected
+    assert "private-parser-diagnostic" not in json.dumps(job)
+    if expected == "failed":
+        assert api.pipeline.calls == []
+    else:
+        assert len(api.pipeline.calls) == 1
+        assert job["result"]["collection"]["count"] == 1
+        error, = job["result"]["errors"]
+        assert error["stage"] == "parsing" and error["code"] == "source_incomplete"
 
 
 def test_question_passes_profile_role_and_news_context_to_pipeline(api_factory):

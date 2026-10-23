@@ -11,6 +11,12 @@ docs/ — задание хакатона.
 До настройки ключа доступны профили, граф и ранее сохранённые результаты.
 Настройка, запуск и проверка: [backend/README_AI.md](backend/README_AI.md).
 
+Кнопка «Анализировать новости» сначала запускает парсер MOEX и ТАСС,
+сохраняет публикации в `data/news/`, затем читает `news.json` и архив
+`batches/` и передаёт тексты моделям. Результаты AI сохраняются в
+`data/ai.sqlite`. В интерфейсе видны этапы сбора и анализа; запуск доступен
+и при пустой папке новостей. API-образ Docker включает Chromium.
+
 ## Сбор новостей через Docker
 
 Из этой папки:
@@ -38,7 +44,8 @@ python -m unittest discover -s tests -p test_core.py -v
 Из `alfa-context/backend`:
 `python -m news_api`
 Открыть http://127.0.0.1:8080 . Остановить Ctrl+C.
-Зависимости: `requirements-api.txt`. Docker: `docker compose up --build api`
+Зависимости: `python -m pip install -r requirements-api.txt` и
+`python -m playwright install chromium`. Docker: `docker compose up --build api`
 из `alfa-context`.
 
 SQLite-база восстанавливается импортом CSV и в архив не включена.
