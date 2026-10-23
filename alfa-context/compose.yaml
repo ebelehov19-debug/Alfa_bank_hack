@@ -1,4 +1,27 @@
 services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.api
+    init: true
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://changellenge.up.railway.app/v1}
+      LLM_GEMMA_MODEL: ${LLM_GEMMA_MODEL:-google/gemma-4-26b-a4b-it}
+      LLM_GLM_MODEL: ${LLM_GLM_MODEL:-z-ai/glm-5.3-flash}
+      NEWS_AI_TOPIC: ${NEWS_AI_TOPIC:-Экономика и бизнес, финансы, регулирование, отрасли и регионы и их влияние на компании}
+      NEWS_AI_BATCH_LIMIT: ${NEWS_AI_BATCH_LIMIT:-10}
+      LLM_MAX_CALLS_PER_RUN: ${LLM_MAX_CALLS_PER_RUN:-20}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-90}
+      LLM_RETRIES: ${LLM_RETRIES:-1}
+      LLM_RUN_TIMEOUT: ${LLM_RUN_TIMEOUT:-180}
+      CONTEXT_COMPANY_IDS: ${CONTEXT_COMPANY_IDS:-}
+    volumes:
+      - ./data:/app/data
+    restart: "no"
+
   parser:
     build:
       context: ./backend

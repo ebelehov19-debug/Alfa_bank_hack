@@ -9,6 +9,8 @@ COPY requirements-test.txt pytest.ini ./
 RUN python -m pip install -r requirements-test.txt
 COPY core.py ./
 COPY news_parser ./news_parser
+COPY news_ai ./news_ai
+COPY news_api.py ./
 COPY tests ./tests
 CMD ["python", "-m", "pytest", "-q"]
 

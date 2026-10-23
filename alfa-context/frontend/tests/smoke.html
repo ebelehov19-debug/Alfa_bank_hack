@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Frontend API and safety smoke tests</title>
+<body>
+<h1>Frontend API and safety smoke tests</h1>
+<pre id="results">Running…</pre>
+<script src="../dist/data.js"></script>
+<script>
+'use strict';
+const results = [];
+const output = document.querySelector('#results');
+const profiles = window.CONTEXT_DATA;
+const response = data => Promise.resolve(new Response(JSON.stringify(data), {status: 200, headers: {'Content-Type': 'application/json'}}));
+const fail = message => { throw new Error(message); };
+const assert = (condition, message) => { if (!condition) fail(message); };
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(predicate, label) {
+  for (let i = 0; i < 600; i++) {
+    if (predicate()) return;
+    await delay(10);
+  }
+  fail(`Timed out: ${label}`);
+}
+function item(companyId = profiles[0].company_id, role = 'cfo', title = 'Actual publication') {
+  return {id: 'article-1', company_id: companyId, role, type: 'risk', category: 'Economy', title,
+    summary: 'A sourced summary', connection: 'Company context', impact: 'Potential impact', action: 'Check contracts',
+    source: 'Actual source', url: 'https://example.org/article', published_at: '2026-10-23T09:00:00Z',
+    relevance: 85, facts: ['Source fact'], uncertainties: ['Unknown payment period'], bank_view: null};
+}
+function scenario(overrides = {}) {
+  const config = {configured: true, news_available: true, missing: [], ...overrides.health};
+  return {
+    async fetch(path, options = {}) {
+      if (path === '/api/health') return response(config);
+      if (path === '/api/companies') return response({companies: profiles});
+      if (overrides.fetch) {
+        const result = overrides.fetch(path, options);
+        if (result !== undefined) return result;
+      }
+      if (path.startsWith('/api/feed?')) return response({items: []});
+      fail(`Unexpected request: ${path}`);
+    }
+  };
+}
+async function fixture(plan) {
+  document.querySelector('iframe')?.remove();
+  window.activeScenario = plan;
+  const frame = document.createElement('iframe');
+  frame.src = `fixture.html?case=${results.length}`;
+  document.body.append(frame);
+  await new Promise(resolve => frame.onload = resolve);
+  return {frame, window: frame.contentWindow, document: frame.contentDocument, query: selector => frame.contentDocument.querySelector(selector)};
+}
+function select(ctx, id, value) {
+  const element = ctx.query(id);
+  element.value = value;
+  element.dispatchEvent(new ctx.window.Event('change', {bubbles: true}));
+}
+async function test(name, task) {
+  try { await task(); results.push(`PASS ${name}`); }
+  catch (error) { results.push(`FAIL ${name}: ${error.message}`); }
+  output.textContent = results.join('\n');
+}
+(async () => {
+  await test('No-key startup, real fallback profiles, graph and no demo feed', async () => {
+    const ctx = await fixture(scenario({health: {configured: false}}));
+    await until(() => ctx.query('#serviceStatus').textContent.includes('настройки подключения моделей'), 'no-key state');
+    assert(ctx.query('#analyzeNews').disabled, 'analysis must be disabled without configuration');
+    assert(!ctx.query('.card'), 'no demo events allowed');
+    assert(ctx.query('#companySelect').options.length === 3, 'real profiles available');
+    ctx.query('[data-page="network"]').click();
+    assert(ctx.query('.network-svg'), 'payment graph survives API integration');
+    ctx.query('[data-page="company"]').click();
+    assert(ctx.query('.profile-grid').textContent.includes(profiles[0].company_id), 'company profile works');
+  });
+
+  await test('API unavailable retains profiles and explains server opening', async () => {
+    const ctx = await fixture({fetch: () => Promise.reject(new Error('offline'))});
+    await until(() => ctx.query('#serviceStatus').textContent.includes('Сервис новостей недоступен'), 'offline state');
+    assert(ctx.query('#serviceStatus').textContent.includes('http://127.0.0.1:8080'), 'server address provided');
+    assert(ctx.query('#analyzeNews').disabled, 'offline analysis disabled');
+    assert(ctx.query('#companySelect').options.length === 3, 'offline profiles retained');
+  });
+
+  await test('Real feed and drawer escape model text and reject unsafe URLs', async () => {
+    const evil = '<img src=x onerror="window.__xss=1">';
+    const article = {...item(), id: '\" onclick=\"window.__xss=1', title: evil, summary: '<script>window.__xss=2<\/script>',
+      category: evil, connection: evil, impact: evil, action: evil, source: evil, facts: [evil], uncertainties: [evil], url: 'javascript:window.__xss=3'};
+    const ctx = await fixture(scenario({fetch: path => path.startsWith('/api/feed?') ? response({items: [article]}) : undefined}));
+    await until(() => ctx.query('.card'), 'real feed');
+    assert(ctx.query('.card h2').textContent === evil, 'model title appears as plain text');
+    assert(!ctx.query('#cards img') && !ctx.query('#cards script'), 'card cannot inject elements');
+    ctx.query('[data-open]').click();
+    assert(ctx.query('#detail').open, 'drawer opens using escaped article ID');
+    assert(!ctx.query('#detail img') && !ctx.query('#detail script'), 'drawer cannot inject elements');
+    assert(!ctx.query('#detail a'), 'unsafe source URL not linked');
+    assert(ctx.window.__xss === 0, 'no script ran');
+    assert(ctx.window.eval("safeUrl('data:text/html,boom')") === '', 'data URL rejected');
+    assert(ctx.window.eval("safeUrl('https://user:pass@example.org')") === '', 'credential URL rejected');
+    assert(ctx.window.eval("safeUrl('https://example.org/news?q=1')").startsWith('https:'), 'safe HTTP URL retained');
+  });
+
+  await test('Saved events are isolated by company and role', async () => {
+    const ctx = await fixture(scenario({fetch: path => {
+      if (!path.startsWith('/api/feed?')) return;
+      const params = new URL(path, location.origin).searchParams;
+      return response({items: [item(params.get('company_id'), params.get('role'))]});
+    }}));
+    await until(() => ctx.query('.card'), 'feed');
+    ctx.query('[data-save]').click();
+    assert(ctx.query('[data-save]').getAttribute('aria-pressed') === 'true', 'event saved');
+    select(ctx, '#roleSelect', 'ceo');
+    await until(() => ctx.query('.card'), 'CEO feed');
+    assert(ctx.query('[data-save]').getAttribute('aria-pressed') === 'false', 'different role does not inherit bookmark');
+    select(ctx, '#roleSelect', 'cfo');
+    await until(() => ctx.query('.card'), 'CFO feed');
+    assert(ctx.query('[data-save]').getAttribute('aria-pressed') === 'true', 'original bookmark retained');
+    select(ctx, '#companySelect', profiles[1].company_id);
+    await until(() => ctx.query('.card'), 'other company feed');
+    assert(ctx.query('[data-save]').getAttribute('aria-pressed') === 'false', 'different company does not inherit bookmark');
+  });
+
+  await test('Background analysis polls, shows partial completion and refreshes feed', async () => {
+    let finished = false, polls = 0, posted;
+    const ctx = await fixture(scenario({fetch: (path, options) => {
+      if (path.startsWith('/api/feed?')) return response({items: finished ? [item()] : []});
+      if (path === '/api/analyze') { posted = JSON.parse(options.body); return response({job_id: 'job-1'}); }
+      if (path === '/api/jobs/job-1') {
+        polls++;
+        finished = polls > 1;
+        return response({id: 'job-1', status: finished ? 'completed' : 'running', result: finished ? {errors: [{stage: 'analysis'}]} : null});
+      }
+    }}));
+    await until(() => ctx.query('#analyzeNews') && !ctx.query('#analyzeNews').disabled, 'analysis enabled');
+    ctx.query('#analyzeNews').click();
+    assert(ctx.query('#analyzeNews').disabled, 'analysis button locked while job active');
+    await until(() => ctx.query('.card') && ctx.query('.analysis-notice'), 'job completed and feed refreshed');
+    assert(polls === 2, 'poll stops after completion');
+    assert(ctx.query('.analysis-notice').textContent.includes('частично'), 'partial analysis visible');
+    assert(posted.company_id === profiles[0].company_id && posted.role === 'cfo', 'analysis uses current context');
+  });
+
+  await test('Company change ignores a late response even if transport ignores abort', async () => {
+    let resolveOld, oldRequested = false;
+    const ctx = await fixture(scenario({fetch: path => {
+      if (!path.startsWith('/api/feed?')) return;
+      const params = new URL(path, location.origin).searchParams;
+      const id = params.get('company_id');
+      if (id === profiles[0].company_id) {
+        oldRequested = true;
+        return new Promise(resolve => { resolveOld = () => resolve(response({items: [item(id, 'cfo', 'STALE RESPONSE')]})); });
+      }
+      return response({items: [item(id, 'cfo', 'CURRENT COMPANY')]});
+    }}));
+    await until(() => oldRequested, 'first request pending');
+    select(ctx, '#companySelect', profiles[1].company_id);
+    await until(() => ctx.query('.card h2')?.textContent === 'CURRENT COMPANY', 'new company response');
+    resolveOld();
+    await delay(30);
+    assert(ctx.query('.card h2').textContent === 'CURRENT COMPANY', 'stale response cannot replace current feed');
+  });
+
+  await test('Question uses article context, escapes answer and validates citation URLs', async () => {
+    let questionBody;
+    const ctx = await fixture(scenario({fetch: (path, options) => {
+      if (path.startsWith('/api/feed?')) return response({items: [item()]});
+      if (path === '/api/questions') {
+        questionBody = JSON.parse(options.body);
+        return response({answer: '<img src=x onerror="window.__xss=5">', sources: [
+          {title: 'Unsafe', url: 'javascript:window.__xss=6'}, {title: '<b>Safe source</b>', url: 'https://example.org/article'}
+        ]});
+      }
+    }}));
+    await until(() => ctx.query('.card'), 'feed');
+    ctx.query('[data-open]').click();
+    ctx.query('#detail form input').value = 'What should we check?';
+    ctx.query('#detail form').dispatchEvent(new ctx.window.Event('submit', {bubbles: true, cancelable: true}));
+    await until(() => ctx.query('#answer').textContent.includes('Safe source'), 'question answered');
+    assert(questionBody.news_id === 'article-1' && questionBody.company_id === profiles[0].company_id, 'question carries article and company');
+    assert(questionBody.role === 'cfo' && questionBody.question === 'What should we check?', 'question carries role and text');
+    assert(!ctx.query('#answer img') && !ctx.query('#answer b'), 'answer and citations are plain text');
+    assert(ctx.query('#answer').querySelectorAll('a').length === 1, 'only safe citation linked');
+    assert(ctx.window.__xss === 0, 'answer cannot execute script');
+    select(ctx, '#roleSelect', 'ceo');
+    assert(!ctx.query('#detail').open, 'old drawer closes on role change');
+  });
+
+  await test('Question model and budget errors produce safe, visible messages', async () => {
+    let answers = 0;
+    const ctx = await fixture(scenario({fetch: path => {
+      if (path.startsWith('/api/feed?')) return response({items: [item()]});
+      if (path === '/api/questions') return response({answer: '', sources: [], error: {code: ++answers === 1 ? 'provider_http' : 'budget_exceeded', message: 'Provider detail'}});
+    }}));
+    await until(() => ctx.query('.card'), 'feed');
+    ctx.query('[data-open]').click();
+    ctx.query('#detail form input').value = 'Check this';
+    ctx.query('#detail form').dispatchEvent(new ctx.window.Event('submit', {cancelable: true}));
+    await until(() => ctx.query('#answer').textContent.includes('Не удалось подготовить ответ'), 'visible model failure');
+    assert(!ctx.query('#answer').textContent.includes('Provider detail'), 'provider details not exposed');
+    ctx.query('#detail form').dispatchEvent(new ctx.window.Event('submit', {cancelable: true}));
+    await until(() => ctx.query('#answer').textContent.includes('Исчерпан общий дневной бюджет'), 'visible budget error');
+    assert(ctx.query('#answer').textContent.includes('03:00 МСК'), 'budget reset displayed');
+  });
+
+  await test('Role change stops polling and clears old analysis state', async () => {
+    let polls = 0;
+    const ctx = await fixture(scenario({fetch: path => {
+      if (path === '/api/analyze') return response({job_id: 'job-stale'});
+      if (path === '/api/jobs/job-stale') { polls++; return response({status: 'running'}); }
+    }}));
+    await until(() => ctx.query('#analyzeNews') && !ctx.query('#analyzeNews').disabled, 'analysis available');
+    ctx.query('#analyzeNews').click();
+    await until(() => polls === 1, 'job starts');
+    select(ctx, '#roleSelect', 'ceo');
+    await delay(1800);
+    assert(polls === 1, 'old context no longer polled');
+    assert(!ctx.query('.analysis-notice'), 'old result not attributed to new role');
+    assert(!ctx.query('#analyzeNews').disabled, 'new context is ready');
+  });
+
+  await test('Late question answer cannot populate a new role drawer', async () => {
+    let resolveQuestion;
+    const ctx = await fixture(scenario({fetch: path => {
+      if (path.startsWith('/api/feed?')) {
+        const params = new URL(path, location.origin).searchParams;
+        return response({items: [item(params.get('company_id'), params.get('role'))]});
+      }
+      if (path === '/api/questions') return new Promise(resolve => { resolveQuestion = () => resolve(response({answer: 'STALE ANSWER', sources: []})); });
+    }}));
+    await until(() => ctx.query('.card'), 'feed');
+    ctx.query('[data-open]').click();
+    ctx.query('#detail form input').value = 'Old question';
+    ctx.query('#detail form').dispatchEvent(new ctx.window.Event('submit', {cancelable: true}));
+    await until(() => resolveQuestion, 'question pending');
+    select(ctx, '#roleSelect', 'ceo');
+    await until(() => ctx.query('.card'), 'new role feed');
+    ctx.query('[data-open]').click();
+    resolveQuestion();
+    await delay(30);
+    assert(!ctx.query('#answer').textContent.includes('STALE ANSWER'), 'stale question result ignored');
+  });
+
+  document.querySelector('iframe')?.remove();
+  const failed = results.filter(result => result.startsWith('FAIL')).length;
+  output.textContent = `${results.join('\n')}\nRESULT: ${results.length - failed}/${results.length} passed`;
+  document.body.dataset.testStatus = failed ? 'failed' : 'passed';
+  document.title = failed ? 'FAIL frontend smoke' : 'PASS frontend smoke';
+  await fetch(`/__smoke_result/${failed ? 'failed' : 'passed'}?results=${encodeURIComponent(JSON.stringify(results))}`);
+})();
+</script>
+</body>
+</html>

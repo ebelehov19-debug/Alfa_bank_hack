@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<title>Изолированный стенд интерфейса</title>
+<body>
+<nav>
+  <button data-page="feed"><b id="feedCount">0</b></button>
+  <button data-page="saved">Сохранённое</button>
+  <button data-page="network">Связи</button>
+  <button data-page="company">Профиль</button>
+  <button data-page="sources">Источники</button>
+</nav>
+<select id="companySelect"></select>
+<select id="roleSelect"><option value="cfo">CFO</option><option value="ceo">CEO</option><option value="treasury">Казначей</option></select>
+<div id="crumb"></div><h1 id="title"></h1><p id="subtitle"></p>
+<div id="serviceStatus"></div><div id="view"></div>
+<dialog id="detail"><div id="detailContent"></div></dialog>
+<script>
+'use strict';
+const scenario = window.parent.activeScenario;
+window.fetch = (path, options) => scenario.fetch(String(path), options);
+window.__xss = 0;
+localStorage.removeItem('alfa-saved-v2');
+</script>
+<script src="../dist/data.js"></script>
+<script src="../dist/app.js"></script>
+</body>
+</html>

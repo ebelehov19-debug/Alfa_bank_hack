@@ -30,8 +30,8 @@
       ◫
      </span>
      Моя лента
-     <b>
-      4
+     <b id="feedCount">
+      0
      </b>
     </button>
     <button data-page="network">
@@ -66,7 +66,7 @@
     <p>
      Контекст из ваших CSV.
      <br/>
-     События — учебные сценарии.
+     Новости и персональный разбор.
     </p>
    </div>
    <div class="user">
@@ -134,11 +134,8 @@
       </select>
      </div>
     </div>
-    <div class="demo-banner">
-     <span class="badge">
-      ДЕМО
-     </span>
-     Профили и связи рассчитаны по CSV. Новости и интерпретации смоделированы; LLM и сбор источников ещё не подключены.
+    <div class="service-banner" id="serviceStatus" role="status" aria-live="polite">
+     Подключаемся к сервису новостей…
     </div>
     <div id="view">
     </div>

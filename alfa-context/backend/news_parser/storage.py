@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 
 from .models import SOURCES, parse_date
 
@@ -30,11 +32,11 @@ class Storage:
         handle.seek(0)
         if os.name == "nt":
             import msvcrt
-            if handle.read(1) == b"":
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
             try:
+                if handle.read(1) == b"":
+                    handle.write(b"0")
+                    handle.flush()
+                handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError:
                 handle.close()
@@ -99,7 +101,38 @@ class Storage:
             report['count'] = len(files['news.json'])
         if set(files) != expected:
             raise ValueError("Invalid pending transaction")
+        # Preserve a pre-upgrade latest batch as well as the incoming batch. Archive
+        # persistence precedes any replacement of latest files or deduplication state.
+        previous_news = self.directory / 'news.json'
+        previous_report = self.directory / 'run_report.json'
+        if previous_news.exists() and previous_report.exists():
+            self.archive(json.loads(previous_news.read_text(encoding='utf-8')),
+                         json.loads(previous_report.read_text(encoding='utf-8')))
+        self.archive(files['news.json'], files['run_report.json'])
         for name in [*(f"{s}.json" for s in SOURCES), "news.json", "state.json", "run_report.json"]:
             atomic_json(self.directory / name, files[name])
         pending.unlink()
         (self.directory / 'e_disclosure.json').unlink(missing_ok=True)
+
+    def archive(self, articles, report):
+        if not articles:
+            return
+        if not isinstance(articles, list) or not isinstance(report, dict):
+            raise ValueError('Invalid batch for archive')
+        articles = [row for row in articles if isinstance(row, dict) and row.get('source') in SOURCES]
+        if not articles:
+            return
+        payload = {'articles': articles, 'report': report}
+        fingerprint = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()[:24]
+        run_id = str(report.get('run_id', ''))
+        safe = re.fullmatch(r'[A-Za-z0-9_-]{1,100}', run_id) and not re.fullmatch(
+            r'CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]', run_id, re.I)
+        name = run_id if safe else 'batch-' + fingerprint
+        path = self.directory / 'batches' / (name + '.json')
+        if path.exists():
+            if json.loads(path.read_text(encoding='utf-8')) == payload:
+                return
+            path = path.with_name(name + '-' + fingerprint + '.json')
+            if path.exists() and json.loads(path.read_text(encoding='utf-8')) == payload:
+                return
+        atomic_json(path, payload)
