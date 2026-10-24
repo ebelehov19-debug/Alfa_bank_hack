@@ -38,8 +38,7 @@ const news = [{
   impact: 'Высокая ставка может сохранять стоимость новых заимствований и рефинансирования. Влияние на действующие кредиты зависит от условий договоров.',
   action: 'Проверить график рефинансирования и долю кредитов с плавающей ставкой.',
   source: 'Банк России',
-  url: 'https://www.cbr.ru/',
-  weights: [92, 85, 79]
+  url: 'https://www.cbr.ru/'
 }, {
   id: 'logistics',
   type: 'risk',
@@ -50,8 +49,7 @@ const news = [{
   impact: 'Если компания оплачивает перевозки, изменения тарифов могут затронуть расходы. Для перевозчика важно соотношение роста собственных затрат и тарифов.',
   action: 'Уточнить долю транспортных расходов и возможность пересмотра тарифов по договорам.',
   source: 'Минтранс России',
-  url: 'https://mintrans.gov.ru/',
-  weights: [77, 79, 95]
+  url: 'https://mintrans.gov.ru/'
 }, {
   id: 'support',
   type: 'opportunity',
@@ -62,8 +60,7 @@ const news = [{
   impact: 'Потенциальная возможность зависит от опубликованных условий программы. Совпадение отрасли само по себе не гарантирует право на поддержку.',
   action: 'Сопоставить критерии конкретной программы с параметрами компании и сроками подачи.',
   source: 'Правительство России',
-  url: 'https://government.ru/',
-  weights: [85, 68, 70]
+  url: 'https://government.ru/'
 }, {
   id: 'demand',
   type: 'risk',
@@ -74,8 +71,7 @@ const news = [{
   impact: 'При подтверждении коммерческой природы платежей концентрация на одной отрасли может означать чувствительность к её спросу. Дат и назначения платежей недостаточно для оценки динамики.',
   action: 'Проверить крупнейших плательщиков и сопоставить поступления с фактическими продажами.',
   source: 'Росстат',
-  url: 'https://rosstat.gov.ru/',
-  weights: [81, 90, 83]
+  url: 'https://rosstat.gov.ru/'
 }];
 const pages = {
   feed: 'Моя лента',
@@ -86,18 +82,18 @@ const pages = {
 };
 $('#companySelect').innerHTML = data.map((c, i) => `<option value="${i}">${esc(c.company_id)} · ${names[i]}</option>`).join('');
 $('#companySelect').onchange = e => {
-  state.company = +e.target.value;
+  state.company = +e.target.value; customResult = "";
   render()
 };
 $('#roleSelect').onchange = e => {
-  state.role = e.target.value;
+  state.role = e.target.value; customResult = "";
   render()
 };
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   state.page = b.dataset.page;
   render()
 });
-const score = n => Math.min(99, n.weights[state.company] + (state.role === 'treasury' && n.id === 'rate' ? 5 : state.role === 'ceo' && n.id === 'support' ? 10 : 0));
+const score = n => assessment(n)?.score ?? -1;
 const connection = n => {
   const c = company();
   if (n.id === 'rate') return `Кредитные продукты: ${c.features.CL_PRODUCT_LOA_MARK==='1.0'?'есть':'не отмечены'}. ${n.theme}`;
@@ -114,7 +110,7 @@ function metric(label, value, help) {
 }
 
 function card(n) {
-  return `<article class="card"><div class="card-top"><span class="tag ${n.type==='opportunity'?'green':''}">${n.type==='opportunity'?'ВОЗМОЖНОСТЬ':'РИСК'}</span><span>${n.category}</span><span class="score"><b>${score(n)}</b>/100 · демо</span></div><h2>${n.title}</h2><p>${n.summary}</p><div class="why"><strong>ПОЧЕМУ ЭТО МОЖЕТ БЫТЬ ВАЖНО</strong>${esc(connection(n))}</div><div class="card-bottom"><button class="link-btn" data-open="${n.id}">Разобрать влияние <span aria-hidden="true">↗</span></button><button class="bookmark ${saved.has(n.id)?'saved':''}" data-save="${n.id}" aria-label="${saved.has(n.id)?'Удалить из сохранённого':'Сохранить событие'}" aria-pressed="${saved.has(n.id)}">${saved.has(n.id)?'★':'☆'}</button></div></article>`
+  return `<article class="card"><div class="card-top"><span class="tag ${n.type==='opportunity'?'green':''}">${n.type==='opportunity'?'ВОЗМОЖНОСТЬ':'РИСК'}</span><span>${n.category}</span>${scoreBadge(n)}</div><h2>${n.title}</h2><p>${n.summary}</p><div class="why"><strong>ПОЧЕМУ ЭТО МОЖЕТ БЫТЬ ВАЖНО</strong>${esc(connection(n))}</div>${assessmentHTML(n)}<div class="card-bottom"><button class="link-btn" data-evaluate="${n.id}" ${aiBusy ? "disabled" : ""}>Оценить AI</button><button class="link-btn" data-open="${n.id}">Разобрать влияние <span aria-hidden="true">↗</span></button><button class="bookmark ${saved.has(n.id)?'saved':''}" data-save="${n.id}" aria-label="${saved.has(n.id)?'Удалить из сохранённого':'Сохранить событие'}" aria-pressed="${saved.has(n.id)}">${saved.has(n.id)?'★':'☆'}</button></div></article>`
 }
 
 function rail() {
@@ -125,7 +121,7 @@ function rail() {
 
 function renderFeed() {
   const p = company().payments;
-  $('#view').innerHTML = `<div class="metrics">${metric('Событий в демоленте','4','Смоделированные примеры')}${metric('Входящих контрагентов',num(p.incoming.counterparty_count),'По предоставленным платежам')}${metric('Концентрация топ-5',pct(p.incoming.top_5_concentration),'Доля входящего объёма')}</div><div class="feed-layout"><section><div class="toolbar"><div class="tabs"><button data-filter="all">Все события</button><button data-filter="risk">Риски</button><button data-filter="opportunity">Возможности</button></div><input class="search" id="search" aria-label="Поиск событий" placeholder="Поиск по ленте" value="${esc(state.query)}"></div><div class="cards" id="cards"></div></section>${rail()}</div>`;
+  $('#view').innerHTML = `<div class="metrics">${metric('Событий в демоленте','4','Смоделированные примеры')}${metric('Входящих контрагентов',num(p.incoming.counterparty_count),'По предоставленным платежам')}${metric('Концентрация топ-5',pct(p.incoming.top_5_concentration),'Доля входящего объёма')}</div>${localPanel()}<div class="feed-layout"><section><div class="toolbar"><div class="tabs"><button data-filter="all">Все события</button><button data-filter="risk">Риски</button><button data-filter="opportunity">Возможности</button></div><input class="search" id="search" aria-label="Поиск событий" placeholder="Поиск по ленте" value="${esc(state.query)}"></div><div class="cards" id="cards"></div></section>${rail()}</div>`;
   document.querySelectorAll('[data-filter]').forEach(b => {
     b.classList.toggle('active', b.dataset.filter === state.filter);
     b.onclick = () => {
@@ -137,7 +133,7 @@ function renderFeed() {
     state.query = e.target.value;
     renderCards()
   };
-  renderCards()
+  renderCards(); bindLocalPanel()
 }
 
 function renderCards() {
@@ -204,6 +200,7 @@ function render() {
 }
 
 function bind() {
+  document.querySelectorAll("[data-evaluate]").forEach(b => b.onclick = () => evaluateNews([news.find(n => n.id === b.dataset.evaluate)]));
   document.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openDetail(b.dataset.open));
   document.querySelectorAll('[data-save]').forEach(b => b.onclick = () => {
     saved.has(b.dataset.save) ? saved.delete(b.dataset.save) : saved.add(b.dataset.save);
@@ -221,7 +218,7 @@ function bind() {
 
 function openDetail(id) {
   const n = news.find(n => n.id === id);
-  $('#detailContent').innerHTML = `<div class="drawer"><div class="drawer-top"><span class="tag">УЧЕБНЫЙ СЦЕНАРИЙ</span><button class="close" aria-label="Закрыть">×</button></div><h2>${n.title}</h2><p>${n.summary}</p><div class="why"><strong>КОНТЕКСТ ${esc(company().company_id)}</strong>${esc(connection(n))}</div><h3>Возможное влияние</h3><p>${n.impact}</p><h3>Что можно проверить</h3><p>${n.action}</p><h3>Позиция Альфа-Банка</h3><div class="source-box">Материалы банка не загружены. Экспертная оценка банка пока недоступна.</div><h3>На чём основан разбор</h3><div class="source-box"><b>Профиль и связи · реальные данные</b><br>df_Uid_data_hack.csv / df_Uid_payment_hack.csv<br>Компания: ${esc(company().company_id)}</div><div class="source-box"><b>Событие · смоделировано</b><br>Подтверждающей публикации нет.<br>Планируемый источник: <a href="${n.url}" target="_blank" rel="noopener noreferrer">${n.source} ↗</a></div><h3>Как будет работать агент</h3><ol class="steps"><li>План анализа и проверка контекста</li><li>Поиск новости и банковской аналитики</li><li>Проверка оснований и противоречий</li><li>Дополнительный поиск или отметка неопределённости</li></ol><p class="hint">Это схема будущей работы. Агентные вызовы в прототипе не выполняются.</p><h3>Уточнить по компании</h3><p>Два быстрых ответа рассчитаны из CSV. Свободные вопросы требуют подключения LLM.</p><button class="question" data-question="coverage">Насколько полны данные о плательщиках?</button><button class="question" data-question="concentration">Какая концентрация входящих платежей?</button><form class="ask"><input aria-label="Вопрос по событию" placeholder="Ваш вопрос…" required maxlength="500"><button class="red-button" type="submit">↑</button></form><div id="answer" aria-live="polite"></div></div>`;
+  $('#detailContent').innerHTML = `<div class="drawer"><div class="drawer-top"><span class="tag">УЧЕБНЫЙ СЦЕНАРИЙ</span><button class="close" aria-label="Закрыть">×</button></div><h2>${n.title}</h2><p>${n.summary}</p><div class="why"><strong>КОНТЕКСТ ${esc(company().company_id)}</strong>${esc(connection(n))}</div>${assessmentHTML(n)}<h3>Возможное влияние · учебный сценарий</h3><p>${n.impact}</p><h3>Что можно проверить</h3><p>${n.action}</p><h3>Позиция Альфа-Банка</h3><div class="source-box">Материалы банка не загружены. Экспертная оценка банка пока недоступна.</div><h3>На чём основан разбор</h3><div class="source-box"><b>Профиль и связи · реальные данные</b><br>df_Uid_data_hack.csv / df_Uid_payment_hack.csv<br>Компания: ${esc(company().company_id)}</div><div class="source-box"><b>Событие · смоделировано</b><br>Подтверждающей публикации нет.<br>Планируемый источник: <a href="${n.url}" target="_blank" rel="noopener noreferrer">${n.source} ↗</a></div><h3>Как будет работать агент</h3><ol class="steps"><li>План анализа и проверка контекста</li><li>Поиск новости и банковской аналитики</li><li>Проверка оснований и противоречий</li><li>Дополнительный поиск или отметка неопределённости</li></ol><p class="hint">Это схема будущей работы. Агентные вызовы в прототипе не выполняются.</p><h3>Уточнить по компании</h3><p>Два быстрых ответа рассчитаны из CSV. Свободные вопросы требуют подключения LLM.</p><button class="question" data-question="coverage">Насколько полны данные о плательщиках?</button><button class="question" data-question="concentration">Какая концентрация входящих платежей?</button><form class="ask"><input aria-label="Вопрос по событию" placeholder="Ваш вопрос…" required maxlength="500"><button class="red-button" type="submit">↑</button></form><div id="answer" aria-live="polite"></div></div>`;
   $('#detail .close').onclick = () => $('#detail').close();
   document.querySelectorAll('[data-question]').forEach(b => b.onclick = () => {
     const p = company().payments.incoming;

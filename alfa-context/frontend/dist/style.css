@@ -1086,3 +1086,13 @@ dialog::backdrop {
     font-size: 10px
   }
 }
+.ai-panel { margin-bottom:24px; }
+.ai-panel details { margin-top:20px; }
+.ai-panel summary { cursor:pointer; }
+.ai-panel label { display:block; margin:14px 0; }
+.ai-panel input, .ai-panel textarea { display:block; width:100%; box-sizing:border-box; margin-top:6px; padding:12px; border:1px solid #dce0e8; border-radius:10px; font:inherit; }
+.ai-result { margin:16px 0; padding:14px; border-radius:10px; background:#f4f7fa; overflow-wrap:anywhere; }
+.ai-result small { display:block; margin-top:8px; color:#596579; }
+.ai-error { color:#b42318; overflow-wrap:anywhere; }
+button:disabled { opacity:.55; cursor:wait; }
+.card-bottom { flex-wrap:wrap; gap:12px; }

@@ -52,3 +52,4 @@ Desktop.ini
 /alfa-context-all*.zip
 
 # frontend/dist contains source files and must remain tracked.
+alfa-context/.local/
