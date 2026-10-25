@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
+
+from news_parser.models import SOURCES, source_cutoff, source_hours
 
 from .client import Budget, ModelClient, ModelError
 from .config import Settings
@@ -14,7 +16,7 @@ from .store import Store, compact, content_hash, digest
 PROMPT_VERSION = "news-ai-1"
 MAX_INPUT_FILE = 8 * 1024 * 1024
 NEWS_LIMITATIONS = [
-    "Порция парсера ограничена публичной лентой и лимитом; полнота новостей за 48 часов не гарантируется.",
+    "Порция парсера ограничена публичной лентой и лимитом; полнота новостей МОСБИРЖИ и ТАСС за 48 часов, Альфа-Банка за 7 дней не гарантируется.",
     "Дата публикации новости не определяет дату события; обновления статьи могут отсутствовать.",
     "Одинаковые события разных источников могут повторяться; источник сам по себе не подтверждает влияние на компанию.",
 ]
@@ -67,10 +69,10 @@ def _article(value: dict) -> dict:
     if not isinstance(value, dict):
         raise ValueError("Invalid raw article")
     source = value.get("source")
-    if source not in {"moex", "tass"}:
+    if source not in SOURCES:
         raise ValueError("Unsupported news source")
     article_id = value.get("id")
-    if not isinstance(article_id, str) or not re.fullmatch(r"(?:moex|tass):[0-9a-f]{24}", article_id):
+    if not isinstance(article_id, str) or not re.fullmatch(r"(?:moex|tass|alfa):[0-9a-f]{24}", article_id):
         raise ValueError("Invalid article ID")
     if not article_id.startswith(source + ":"):
         raise ValueError("Article source/ID mismatch")
@@ -78,7 +80,8 @@ def _article(value: dict) -> dict:
     if not isinstance(url, str) or len(url) > 4000:
         raise ValueError("Invalid news URL")
     parsed = urlsplit(url)
-    expected = {"moex": {"moex.com", "www.moex.com", "iss.moex.com"}, "tass": {"tass.ru", "www.tass.ru"}}[source]
+    expected = {"moex": {"moex.com", "www.moex.com", "iss.moex.com"}, "tass": {"tass.ru", "www.tass.ru"},
+                "alfa": {"alfabank.ru", "www.alfabank.ru"}}[source]
     if (parsed.scheme not in {"https", "http"} or parsed.hostname not in expected
             or parsed.username or parsed.password or parsed.port not in (None, 80, 443)):
         raise ValueError("Invalid news URL")
@@ -147,7 +150,7 @@ class Pipeline:
                 try:
                     value = _read_json(path)
                     articles = value if path == latest else value["articles"]
-                    if not isinstance(articles, list) or len(articles) > 400:
+                    if not isinstance(articles, list) or len(articles) > 600:
                         raise ValueError("Invalid news batch")
                     for raw in articles:
                         try:
@@ -188,10 +191,9 @@ class Pipeline:
         company_hash = digest(company)
         processed = 0
         now = self.now()
-        cutoff = now - timedelta(hours=48)
         try:
             for article in self.store.articles():
-                if not cutoff <= datetime.fromisoformat(article["published_at"]) <= now:
+                if not source_cutoff(article["source"], now) <= datetime.fromisoformat(article["published_at"]) <= now:
                     continue
                 common = self._common(article)
                 classification_key = digest({**common, "stage": "classification"})
@@ -258,8 +260,9 @@ class Pipeline:
         if context is None:
             raise LookupError("Saved analysis not found for this company and role")
         now = self.now()
-        if not now - timedelta(hours=48) <= datetime.fromisoformat(context["article"]["published_at"]) <= now:
-            raise LookupError("Saved news is outside the current 48-hour window")
+        article = context["article"]
+        if not source_cutoff(article["source"], now) <= datetime.fromisoformat(article["published_at"]) <= now:
+            raise LookupError(f"Saved news is outside the current {source_hours(article['source'])}-hour window")
         if context["company_hash"] != digest(company):
             raise ValueError("Company context changed; analyze the news again")
         if self.settings.missing():

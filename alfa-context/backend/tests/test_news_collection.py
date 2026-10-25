@@ -7,12 +7,13 @@ import pytest
 
 import news_parser.__main__ as cli
 from news_parser.runner import collect_news
+from news_parser.models import SOURCES
 from news_parser.storage import Storage
 
 
-def test_collection_uses_both_sources_and_reuses_the_output_browser_session(tmp_path, monkeypatch):
+def test_collection_uses_default_sources_and_reuses_the_output_browser_session(tmp_path, monkeypatch):
     expected = {"count": 0, "sources": {
-        source: {"status": "ok", "exported": 0} for source in ("moex", "tass")
+        source: {"status": "ok", "exported": 0} for source in SOURCES
     }}
     calls = []
 

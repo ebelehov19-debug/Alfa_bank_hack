@@ -19,6 +19,7 @@ from news_ai.config import Settings
 from news_ai.pipeline import Pipeline
 from news_ai.store import Store, digest
 from news_parser.runner import collect_news
+from news_parser.models import SOURCES
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -127,14 +128,17 @@ class Application:
             collection = {"count": report["count"], "sources": {
                 source: {"status": report["sources"][source]["status"],
                          "exported": report["sources"][source]["exported"]}
-                for source in ("moex", "tass")
+                for source in report["sources"] if source in SOURCES
             }}
-            if all(source["status"] == "error" for source in collection["sources"].values()):
+            requested = [source for source in collection["sources"].values()
+                         if source["status"] != "not_requested"]
+            if not requested or all(source["status"] == "error" for source in requested):
                 raise RuntimeError("News sources unavailable")
             collection_errors = [
                 {"stage": "parsing", "code": "source_incomplete", "source": source,
                  "message": f"Источник {source.upper()} обработан не полностью. Анализ выполнен по доступным публикациям."}
-                for source, value in collection["sources"].items() if value["status"] != "ok"
+                for source, value in collection["sources"].items()
+                if value["status"] not in {"ok", "not_requested"}
             ]
             stage = "analyzing"
             with self._jobs_lock:

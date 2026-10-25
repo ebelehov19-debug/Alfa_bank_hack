@@ -50,7 +50,7 @@ def test_cleanup_migrates_batch_preserves_data_and_only_removes_known_check_fold
     assert validate(tmp_path)['count']==2
     assert (keep/'keep.txt').read_text()=='keep'
     for s in SOURCES:
-        assert json.loads((tmp_path/f'{s}.json').read_text())==old[f'{s}.json']
+        assert json.loads((tmp_path/f'{s}.json').read_text())==old.get(f'{s}.json', [])
     assert set(json.loads((tmp_path/'state.json').read_text())['seen'])=={
         r['id'] for r in old['news.json'] if r['source'] in SOURCES}
     clean_browser=json.loads((tmp_path/'.browser-state.json').read_text())
@@ -60,7 +60,7 @@ def test_cleanup_migrates_batch_preserves_data_and_only_removes_known_check_fold
     assert cleanup(tmp_path)['removed']==[]
 
 
-def test_interrupted_legacy_transaction_recovers_to_two_sources(tmp_path):
+def test_interrupted_legacy_transaction_recovers_to_current_sources(tmp_path):
     files=legacy_batch(); atomic_json(tmp_path/'.pending.json',files)
     atomic_json(tmp_path/'e_disclosure.json',files['e_disclosure.json'])
     with Storage(tmp_path).lock(): pass

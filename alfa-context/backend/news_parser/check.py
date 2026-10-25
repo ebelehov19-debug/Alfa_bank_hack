@@ -2,7 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .models import SOURCES, news_id, parse_date
+from .models import SOURCES, news_id, parse_date, source_hours
 
 
 def validate(directory):
@@ -15,8 +15,17 @@ def validate(directory):
         raise ValueError('news.json must contain a JSON array')
     seen, grouped = set(), {s: [] for s in SOURCES}
     start, end = parse_date(report.get('window_start')), parse_date(report.get('window_end'))
-    if not start or not end or not 0 < (end - start).total_seconds() <= 48 * 3600:
+    if not start or not end or not 0 < (end - start).total_seconds() <= 168 * 3600:
         raise ValueError('Invalid report window')
+    windows = {}
+    for source in SOURCES:
+        source_report = report['sources'].get(source, {})
+        source_start = parse_date(source_report.get('window_start', report['window_start']))
+        source_end = parse_date(source_report.get('window_end', report['window_end']))
+        if (not source_start or not source_end or source_end != end
+                or not 0 < (source_end - source_start).total_seconds() <= source_hours(source) * 3600):
+            raise ValueError(f'Invalid report window for {source}')
+        windows[source] = (source_start, source_end)
     for row in combined:
         source = row.get('source')
         if source not in grouped or row.get('id') in seen:
@@ -25,7 +34,8 @@ def validate(directory):
             raise ValueError('ID does not match source URL')
         published = parse_date(row.get('published_at'))
         collected = parse_date(row.get('collected_at'))
-        if not published or not start <= published <= end or not collected:
+        source_start, source_end = windows[source]
+        if not published or not source_start <= published <= source_end or not collected:
             raise ValueError('Missing or out-of-window timestamp')
         if not row.get('title') or not isinstance(row.get('text'), str) or len(row['text']) < 40:
             raise ValueError('Missing title or full text')
@@ -36,12 +46,17 @@ def validate(directory):
     for source, rows in grouped.items():
         if len(rows) > min(200, report['limit_per_source']):
             raise ValueError(f'{source} exceeds the per-source limit')
-        source_rows = json.loads((directory / f'{source}.json').read_text(encoding='utf-8'))
-        if rows != source_rows or report['sources'][source]['exported'] != len(rows):
+        source_path = directory / f'{source}.json'
+        source_report = report['sources'].get(source)
+        if source == 'alfa' and source_report is None and not source_path.exists() and not rows:
+            continue  # A complete pre-Alfa batch remains readable.
+        source_rows = json.loads(source_path.read_text(encoding='utf-8'))
+        if rows != source_rows or source_report['exported'] != len(rows):
             raise ValueError(f'{source}.json differs from news.json or report')
     if len(combined) != report['count']:
         raise ValueError('Report count differs from news.json')
-    return {'count': len(combined), 'sources': {s: report['sources'][s]['status'] for s in SOURCES}}
+    return {'count': len(combined), 'sources': {s: report['sources'].get(s, {}).get('status', 'not_requested')
+                                               for s in SOURCES}}
 
 
 def main():

@@ -3,7 +3,7 @@
   "$id": "https://example.invalid/alfa-hack/news.schema.json",
   "title": "News parser batch",
   "type": "array",
-  "maxItems": 400,
+  "maxItems": 600,
   "items": {
     "type": "object",
     "additionalProperties": false,
@@ -22,12 +22,13 @@
     "properties": {
       "id": {
         "type": "string",
-        "pattern": "^(moex|tass):[0-9a-f]{24}$"
+        "pattern": "^(moex|tass|alfa):[0-9a-f]{24}$"
       },
       "source": {
         "enum": [
           "moex",
-          "tass"
+          "tass",
+          "alfa"
         ]
       },
       "url": {

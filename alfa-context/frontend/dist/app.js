@@ -167,7 +167,7 @@ function changeSelection() {
 const canAnalyze = () => state.available && state.health?.configured && state.companyId && !state.job && !state.booting;
 const jobStage = () => state.job?.stage || (state.job?.status === 'queued' ? 'queued' : 'analyzing');
 const jobLabel = () => jobStage() === 'parsing' ? 'Собираем свежие новости…' : jobStage() === 'queued' ? 'Подготавливаем сбор…' : 'Анализируем новости…';
-const jobHint = () => jobStage() === 'parsing' ? 'Загружаем публикации MOEX и ТАСС' : jobStage() === 'queued' ? 'Ожидаем начала сбора новостей' : 'Сопоставляем публикации с контекстом компании';
+const jobHint = () => jobStage() === 'parsing' ? 'Загружаем публикации MOEX, ТАСС и Альфа-Банка' : jobStage() === 'queued' ? 'Ожидаем начала сбора новостей' : 'Сопоставляем публикации с контекстом компании';
 
 async function analyze() {
   if (!canAnalyze()) return;

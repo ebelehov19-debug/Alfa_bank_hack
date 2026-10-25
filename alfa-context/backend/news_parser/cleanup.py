@@ -27,15 +27,19 @@ def cleanup(directory):
         if state_path.exists():
             previous = json.loads(state_path.read_text(encoding='utf-8'))
             dropped = len(previous['seen']) - len(state)
-        batch_names = [*(f'{s}.json' for s in SOURCES), 'news.json', 'run_report.json']
+        # A complete pre-Alfa batch has two source files. Upgrade it on the
+        # normal atomic storage path while retaining legacy disclosure cleanup.
+        batch_names = ['moex.json', 'tass.json', 'news.json', 'run_report.json']
         present = [name for name in batch_names if (directory / name).exists()]
         if present and len(present) != len(batch_names):
             raise ValueError('Incomplete output batch; finish a regular parser run before cleanup')
         if present:
             rows = json.loads((directory / 'news.json').read_text(encoding='utf-8'))
             report = json.loads((directory / 'run_report.json').read_text(encoding='utf-8'))
+            if 'alfa' in report['sources'] and not (directory / 'alfa.json').exists():
+                raise ValueError('Incomplete output batch; missing alfa.json')
             rows = [row for row in rows if row['source'] in SOURCES]
-            report['sources'] = {s: {**report['sources'][s],
+            report['sources'] = {s: {**report['sources'].get(s, {'status': 'not_requested'}),
                                      'exported': sum(row['source'] == s for row in rows)}
                                  for s in SOURCES}
             report['count'] = len(rows)

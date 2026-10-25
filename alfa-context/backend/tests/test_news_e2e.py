@@ -13,7 +13,7 @@ from news_ai.config import Settings
 from news_ai.pipeline import Pipeline
 from news_ai.store import Store
 from news_api import Application
-from news_parser.models import Article, news_id
+from news_parser.models import Article, SOURCES, news_id
 from news_parser.sources import SourceResult
 from news_parser.storage import Storage
 
@@ -130,7 +130,7 @@ def test_analysis_collects_to_files_then_passes_exact_articles_to_both_models(tm
     collected = []
 
     async def collect(settings, selected, state, observed, transport):
-        assert selected == ["moex", "tass"] and state == {}
+        assert selected == list(SOURCES) and state == {}
         assert not (news_dir / "news.json").exists()
         collected.append(True)
         return [SourceResult(source, articles=[a for a in articles if a.source == source],

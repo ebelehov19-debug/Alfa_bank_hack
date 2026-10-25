@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import logging
 import os
@@ -10,17 +10,16 @@ from pathlib import Path
 import sys
 from uuid import uuid4
 
-from .models import Settings, SOURCES, UTC
+from .models import Settings, SOURCES, UTC, source_cutoff, source_hours
 from .sources import ADAPTERS
 from .storage import Storage
 from .transport import Transport
 
 
 async def collect(settings, selected, state, now, transport):
-    cutoff = settings.cutoff(now)
     return await asyncio.gather(*(
         ADAPTERS[name](transport, settings).collect(
-            cutoff, now, {key for key in state if key.startswith(name + ":")})
+            settings.cutoff(now, name), now, {key for key in state if key.startswith(name + ":")})
         for name in selected
     ))
 
@@ -33,7 +32,9 @@ async def collect_to_directory(settings, output, selected=None):
     storage = Storage(output)
     now = datetime.now(UTC)
     with storage.lock():
-        state = storage.state(now - timedelta(hours=48))
+        # A narrower query must not forget already exported articles: the next
+        # run may restore the full 48h/7d window.
+        state = storage.state({source: source_cutoff(source, now) for source in SOURCES})
         async with Transport(settings) as transport:
             results = await collect(settings, selected, state, now, transport)
         articles = [a for r in results for a in r.articles]
@@ -41,12 +42,17 @@ async def collect_to_directory(settings, output, selected=None):
             state[article.id] = article.published_at.isoformat()
         report = {"schema_version": 1, "run_id": str(uuid4()),
                   "started_at": now.isoformat(), "finished_at": datetime.now(UTC).isoformat(),
-                  "window_start": settings.cutoff(now).isoformat(), "window_end": now.isoformat(),
-                  "hours": settings.hours, "limit_per_source": settings.limit,
-                  "count": len(articles), "sources": {name: {"status": "not_requested", "exported": 0}
+                  "window_start": min(settings.cutoff(now, source) for source in selected).isoformat(),
+                  "window_end": now.isoformat(),
+                  "hours": max(source_hours(source, settings.hours) for source in selected),
+                  "limit_per_source": settings.limit,
+                  "count": len(articles), "sources": {name: {"status": "not_requested", "exported": 0,
+                                                       "hours": source_hours(name, settings.hours),
+                                                       "window_start": settings.cutoff(now, name).isoformat(),
+                                                       "window_end": now.isoformat()}
                                                        for name in SOURCES}}
         for result in results:
-            report['sources'][result.source] = result.to_dict()
+            report['sources'][result.source].update(result.to_dict())
         storage.commit(articles, state, report)
     return report
 
@@ -63,10 +69,10 @@ async def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="New public news -> JSON; 48h/200 per source maximum")
+    parser = argparse.ArgumentParser(description="Public news -> JSON; MOEX/TASS 48h, Alfa 7 days; 200 per source maximum")
     parser.add_argument('--sources', nargs='+', choices=SOURCES, default=list(SOURCES))
     parser.add_argument('--output', default=os.getenv('NEWS_OUTPUT', 'data/news'), help='Latest JSON batch and deduplication state')
-    parser.add_argument('--hours', type=int, default=48)
+    parser.add_argument('--hours', type=int, default=48, help='MOEX/TASS window, 1..48 hours; Alfa always uses 7 days')
     parser.add_argument('--limit', type=int, default=200)
     parser.add_argument('--timeout', type=float, default=20)
     parser.add_argument('--browser-timeout', type=float, default=60, help='Maximum wait for visitor JavaScript checks')

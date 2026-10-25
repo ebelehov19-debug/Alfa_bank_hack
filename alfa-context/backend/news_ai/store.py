@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+
+from news_parser.models import source_cutoff
 
 
 def compact(value) -> str:
@@ -114,8 +116,8 @@ class Store:
             rows = db.execute(sql, params).fetchall()
         items = [json.loads(row["body"]) for row in rows]
         now = self.now()
-        cutoff = now - timedelta(hours=48)
-        items = [item for item in items if cutoff <= datetime.fromisoformat(item["published_at"]) <= now]
+        items = [item for item in items
+                 if source_cutoff(item.get("source"), now) <= datetime.fromisoformat(item["published_at"]) <= now]
         items.sort(key=lambda item: (item["relevance"], item["published_at"], item["id"]), reverse=True)
         return [{key: value for key, value in item.items() if not key.startswith("_")} for item in items]
 

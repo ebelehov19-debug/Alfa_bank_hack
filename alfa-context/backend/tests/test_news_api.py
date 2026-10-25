@@ -231,6 +231,40 @@ def test_failed_job_does_not_expose_provider_exception_or_key(api_factory):
     assert "Traceback" not in public_job
 
 
+def test_alfa_collection_remains_available_when_other_sources_fail(api_factory):
+    sources = {'moex': {'status': 'error', 'exported': 0},
+               'tass': {'status': 'error', 'exported': 0},
+               'alfa': {'status': 'ok', 'exported': 7, 'errors': ['private diagnostics']}}
+    api = api_factory(news_collector=lambda directory: {'count': 7, 'sources': sources})
+    status, body = api.request('/api/analyze', 'POST', {'company_id': 'A', 'role': 'cfo'})
+    assert status == 202
+    job = api.wait_for_job(body['job_id'])
+    assert job['status'] == 'completed'
+    assert job['result']['collection']['sources']['alfa'] == {'status': 'ok', 'exported': 7}
+    assert {error['source'] for error in job['result']['errors']} == {'moex', 'tass'}
+    assert 'private diagnostics' not in json.dumps(job)
+    assert api.pipeline.calls[0][0] == 'run'
+
+
+@pytest.mark.parametrize('requested_status', ['ok', 'error'])
+def test_unrequested_sources_do_not_raise_warnings_or_mask_requested_failure(api_factory, requested_status):
+    sources = {'moex': {'status': requested_status, 'exported': 0},
+               'tass': {'status': 'not_requested', 'exported': 0},
+               'alfa': {'status': 'not_requested', 'exported': 0}}
+    api = api_factory(news_collector=lambda directory: {'count': 0, 'sources': sources})
+    status, body = api.request('/api/analyze', 'POST', {'company_id': 'A', 'role': 'cfo'})
+    assert status == 202
+    job = api.wait_for_job(body['job_id'])
+    if requested_status == 'error':
+        assert job['status'] == 'failed'
+        assert api.pipeline.calls == []
+    else:
+        assert job['status'] == 'completed'
+        assert job['result']['collection']['sources'] == sources
+        assert job['result'].get('errors', []) == []
+        assert api.pipeline.calls[0][0] == 'run'
+
+
 def test_polling_remains_available_while_model_call_runs(api_factory):
     api = api_factory()
     started = threading.Event()

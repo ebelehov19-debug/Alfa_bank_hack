@@ -4,7 +4,7 @@ import html
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 from .extract import (article_from_html, clean_text, listing_candidates, next_page,
@@ -309,6 +309,147 @@ class Tass(Source):
         return best
 
 
+class Alfa(Source):
+    name = 'alfa'
+    listing_url = 'https://alfabank.ru/news/t/release/'
+
+    def __init__(self, transport, settings):
+        super().__init__(transport, settings)
+        self._browser_only = False
+
+    async def hydrate(self, candidate, result):
+        from .alfa_extract import extract_alfa
+        best = None
+        if not self._browser_only:
+            try:
+                best = extract_alfa(await self.transport.get(candidate.url), candidate)
+                if best.published_at and best.title and len(best.text) >= 40:
+                    result.methods.append('http_html')
+                    return best
+            except Exception as exc:
+                if '403' in str(exc) or 'access check' in str(exc).lower():
+                    self._browser_only = True
+                log.debug('Alfa HTTP detail fallback: %s', exc)
+        if self.settings.browser:
+            try:
+                full = extract_alfa(await self.transport.render(candidate.url), candidate)
+                result.methods.append('chromium_html')
+                return full
+            except Exception as exc:
+                if best is None:
+                    raise
+                result.errors.append(f'Article browser fallback {candidate.url}: {exc}')
+        if best is None:
+            raise RuntimeError(f'Alfa full HTML article unavailable: {candidate.url}')
+        return best
+
+    async def collect(self, cutoff: datetime, now: datetime, seen: set[str]):
+        from .alfa_extract import alfa_listing_candidates, alfa_next_page
+        # The week is source-specific, independent of the other feeds' --hours.
+        cutoff = self.settings.cutoff(now, self.name)
+        result = SourceResult(self.name)
+        unique, accepted, failure_streak = set(), [], 0
+        stopped = False
+
+        async def consume(raw, base, method):
+            nonlocal stopped, failure_streak
+            items = alfa_listing_candidates(raw, base, now=now)
+            if not items:
+                raise ValueError('Alfa list has no recognized release links')
+            result.discovery_ok = True
+            result.methods.append(method)
+            # A day on the card is only a hint. Always open the cutoff day's
+            # details to decide against its exact publication timestamp.
+            for candidate in items:
+                key = news_id(self.name, candidate.url)
+                if key in unique:
+                    continue
+                unique.add(key)
+                result.discovered += 1
+                if key in seen:
+                    result.already_seen += 1
+                    continue
+                if candidate.published_at and candidate.published_at + timedelta(days=1) <= cutoff:
+                    result.outside_window += 1
+                    continue
+                try:
+                    full = await self.hydrate(candidate, result)
+                    failure_streak = 0
+                    if not full.published_at or not full.title.strip() or len(full.text.strip()) < 40:
+                        result.invalid += 1
+                        continue
+                    if not cutoff <= full.published_at <= now:
+                        result.outside_window += 1
+                        continue
+                    accepted.append(Article(key, self.name, full.url, html.unescape(full.title).strip(),
+                                            full.text.strip(), full.published_at, now,
+                                            full.categories, full.issuer))
+                    if len(accepted) >= self.settings.limit:
+                        stopped = True
+                        break
+                except Exception as exc:
+                    result.errors.append(f'Article {candidate.url}: {exc}')
+                    failure_streak += 1
+                    if failure_streak >= 5:
+                        result.warnings.append('Stopped after 5 consecutive article failures; retry on the next run')
+                        stopped = True
+                        break
+            if all(c.published_at and c.published_at + timedelta(days=1) <= cutoff for c in items):
+                stopped = True
+
+        url, visited, browser_needed = self.listing_url, set(), False
+        try:
+            for _ in range(self.settings.max_pages):
+                identity = canonical_url(url)
+                if identity in visited:
+                    result.warnings.append('Alfa pagination repeated a page URL')
+                    break
+                visited.add(identity)
+                try:
+                    raw = await self.transport.get(url)
+                    await consume(raw, url, 'http_html')
+                except Exception as exc:
+                    log.info('Alfa HTTP list fallback: %s', exc)
+                    browser_needed = True
+                    break
+                if stopped:
+                    break
+                following = alfa_next_page(raw, url)
+                if following is None:
+                    # The current Alfa site paginates with React buttons.
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(raw, 'html.parser')
+                    browser_needed = any(
+                        label.isdigit() or any(word in label.lower() for word in ('страниц', 'далее', 'следующ', 'вперед', 'вперёд', 'ещё', 'еще', 'next'))
+                        for button in soup.select('button:not([disabled]):not([aria-disabled="true"])')
+                        for label in (button.get('aria-label', '').strip(), button.get_text(' ', strip=True)) if label)
+                    break
+                url = following
+            else:
+                result.warnings.append('Alfa HTML pagination reached --max-pages')
+
+            if browser_needed and not stopped:
+                if self.settings.browser:
+                    pages = self.transport.alfa_pages(self.listing_url, cutoff, now)
+                    try:
+                        page_count = 0
+                        async for raw in pages:
+                            page_count += 1
+                            await consume(raw, self.listing_url, 'chromium_html')
+                            if stopped:
+                                break
+                        if page_count >= self.settings.max_pages and not stopped:
+                            result.warnings.append('Alfa browser pagination reached --max-pages')
+                    finally:
+                        await pages.aclose()
+                else:
+                    result.errors.append('Alfa HTML pagination requires browser fallback (--no-browser is set)')
+        except Exception as exc:
+            result.errors.append(f'Alfa discovery: {exc}')
+        accepted.sort(key=lambda article: (article.published_at, article.id), reverse=True)
+        result.articles = accepted
+        return result
 
 
-ADAPTERS = {"moex": Moex, "tass": Tass}
+
+ADAPTERS = {"moex": Moex, "tass": Tass, "alfa": Alfa}

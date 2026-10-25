@@ -10,8 +10,18 @@ from email.utils import parsedate_to_datetime
 
 UTC = timezone.utc
 MSK = ZoneInfo("Europe/Moscow")
-SOURCES = ("moex", "tass")
-HOSTS = {"www.moex.com", "moex.com", "iss.moex.com", "tass.ru", "www.tass.ru"}
+SOURCES = ("moex", "tass", "alfa")
+HOSTS = {"www.moex.com", "moex.com", "iss.moex.com", "tass.ru", "www.tass.ru",
+         "alfabank.ru", "www.alfabank.ru"}
+
+
+def source_hours(source: str | None, hours: int = 48) -> int:
+    """Alfa releases use a week; existing feeds retain their configurable 48h cap."""
+    return 168 if source == "alfa" else hours
+
+
+def source_cutoff(source: str | None, now: datetime, hours: int = 48) -> datetime:
+    return now - timedelta(hours=source_hours(source, hours))
 
 
 def request_url(value: str) -> str:
@@ -124,5 +134,5 @@ class Settings:
         if self.timeout <= 0 or self.browser_timeout <= 0 or self.delay < 0 or not 0 <= self.retries <= 5 or self.max_pages < 1:
             raise ValueError("Invalid network or pagination settings")
 
-    def cutoff(self, now: datetime) -> datetime:
-        return now - timedelta(hours=self.hours)
+    def cutoff(self, now: datetime, source: str | None = None) -> datetime:
+        return source_cutoff(source, now, self.hours)

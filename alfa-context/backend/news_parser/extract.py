@@ -80,6 +80,9 @@ BODY_SELECTORS = {
 def article_from_html(raw: str, source: str, candidate: Candidate, *,
                       observed_at: datetime | None = None,
                       started_at: datetime | None = None, rendered: bool = False) -> Candidate:
+    if source == 'alfa':
+        from .alfa_extract import extract_alfa
+        return extract_alfa(raw, candidate)
     soup = soup_of(raw)
     if is_challenge(raw):
         raise ValueError('Visitor check instead of an article')

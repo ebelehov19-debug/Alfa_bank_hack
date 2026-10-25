@@ -71,7 +71,8 @@ class Storage:
             date = parse_date(value)
             if not date:
                 raise ValueError("Invalid publication timestamp in state.json")
-            if date >= cutoff:
+            source_cutoff = cutoff[key.split(':', 1)[0]] if isinstance(cutoff, dict) else cutoff
+            if date >= source_cutoff:
                 result[key] = value
         return result
 
@@ -91,13 +92,18 @@ class Storage:
             return
         files = json.loads(pending.read_text(encoding="utf-8"))
         expected = {*(f"{s}.json" for s in SOURCES), "news.json", "state.json", "run_report.json"}
-        if set(files) == expected | {'e_disclosure.json'}:
-            files.pop('e_disclosure.json')
+        # Recover transactions created before Alfa was added, including the
+        # older disclosure-source layout. Never discard an unrecognized file.
+        if set(files) in (expected | {'e_disclosure.json'}, expected - {'alfa.json'},
+                          (expected - {'alfa.json'}) | {'e_disclosure.json'}):
+            files.pop('e_disclosure.json', None)
+            files.setdefault('alfa.json', [])
             files['news.json'] = [row for row in files['news.json'] if row['source'] in SOURCES]
             files['state.json']['seen'] = {k: v for k, v in files['state.json']['seen'].items()
                                             if k.startswith(tuple(s + ':' for s in SOURCES))}
             report = files['run_report.json']
-            report['sources'] = {s: report['sources'][s] for s in SOURCES}
+            report['sources'] = {s: report['sources'].get(s, {'status': 'not_requested', 'exported': 0})
+                                 for s in SOURCES}
             report['count'] = len(files['news.json'])
         if set(files) != expected:
             raise ValueError("Invalid pending transaction")
